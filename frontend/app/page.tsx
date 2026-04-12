@@ -8,6 +8,7 @@ import { getRate, createInvoice, checkPaymentStatus } from '@/lib/api'
 import type { InvoiceResponse, RateResponse } from '@/lib/api'
 import { useLanguage } from '@/context/LanguageContext'
 import LanguageSwitcher from '@/components/LanguageSwitcher'
+import PWAInstallPrompt from '@/components/PWAInstallPrompt'
 
 type Screen = 'pos' | 'invoice' | 'success'
 
@@ -242,6 +243,7 @@ export default function POSPage() {
           </div>
         </div>
       )}
+      <PWAInstallPrompt />
     </main>
   )
 }
