@@ -6,10 +6,13 @@ import Link from 'next/link'
 import { QRCodeSVG } from 'qrcode.react'
 import { getRate, createInvoice, checkPaymentStatus } from '@/lib/api'
 import type { InvoiceResponse, RateResponse } from '@/lib/api'
+import { useLanguage } from '@/context/LanguageContext'
+import LanguageSwitcher from '@/components/LanguageSwitcher'
 
 type Screen = 'pos' | 'invoice' | 'success'
 
 export default function POSPage() {
+  const { t } = useLanguage()
   const [zmwInput, setZmwInput] = useState('')
   const [memo, setMemo] = useState('')
   const [rate, setRate] = useState<RateResponse | null>(null)
@@ -32,11 +35,11 @@ export default function POSPage() {
       setRate(r)
       setError('')
     } catch {
-      setError('Could not fetch exchange rate. Check your connection.')
+      setError(t.errorRate)
     } finally {
       setRateLoading(false)
     }
-  }, [])
+  }, [t])
 
   useEffect(() => {
     fetchRate()
@@ -47,7 +50,6 @@ export default function POSPage() {
   useEffect(() => {
     if (screen !== 'invoice' || !invoice) return
     setPaymentPolling(true)
-
     const poll = setInterval(async () => {
       try {
         const status = await checkPaymentStatus(invoice.payment_hash)
@@ -56,22 +58,13 @@ export default function POSPage() {
           setPaymentPolling(false)
           setScreen('success')
         }
-      } catch {
-        // silently retry
-      }
+      } catch { /* silently retry */ }
     }, 3000)
-
-    return () => {
-      clearInterval(poll)
-      setPaymentPolling(false)
-    }
+    return () => { clearInterval(poll); setPaymentPolling(false) }
   }, [screen, invoice])
 
   const handleCharge = async () => {
-    if (!zmwAmount || zmwAmount <= 0) {
-      setError('Enter a valid amount in ZMW')
-      return
-    }
+    if (!zmwAmount || zmwAmount <= 0) { setError(t.errorAmount); return }
     setError('')
     setLoading(true)
     try {
@@ -79,41 +72,27 @@ export default function POSPage() {
       setInvoice(inv)
       setScreen('invoice')
     } catch {
-      setError('Failed to create invoice. Check backend connection.')
+      setError(t.errorInvoice)
     } finally {
       setLoading(false)
     }
   }
 
   const handleNewSale = () => {
-    setZmwInput('')
-    setMemo('')
-    setInvoice(null)
-    setError('')
-    setScreen('pos')
-  }
-
-  const handleCancel = () => {
-    setInvoice(null)
-    setScreen('pos')
+    setZmwInput(''); setMemo(''); setInvoice(null); setError(''); setScreen('pos')
   }
 
   return (
     <main className="min-h-screen bg-surface flex flex-col">
-      {/* Header */}
       <header className="border-b border-border px-6 py-4 flex items-center justify-between">
         <div className="flex items-center gap-3">
           <Zap className="text-bitcoin" size={22} fill="#F7931A" />
-          <span className="font-display font-bold text-lg tracking-tight text-text">ZamPOS</span>
-          <Link
-            href="/dashboard"
-            className="text-text-dim hover:text-bitcoin transition-colors ml-1"
-            title="Dashboard"
-          >
+          <span className="font-display font-bold text-lg tracking-tight text-text">{t.appName}</span>
+          <Link href="/dashboard" className="text-text-dim hover:text-bitcoin transition-colors ml-1" title={t.dashboard}>
             <LayoutDashboard size={16} />
           </Link>
         </div>
-        <div className="flex items-center gap-2 text-text-dim text-sm font-mono">
+        <div className="flex items-center gap-3 text-text-dim text-sm font-mono">
           {rateLoading ? (
             <RefreshCw size={12} className="animate-spin text-bitcoin" />
           ) : rate ? (
@@ -122,19 +101,19 @@ export default function POSPage() {
               <span>{rate.zmw_per_btc.toLocaleString()} ZMW</span>
             </>
           ) : null}
-          <button onClick={fetchRate} className="ml-1 text-muted hover:text-bitcoin transition-colors">
+          <button onClick={fetchRate} className="text-muted hover:text-bitcoin transition-colors">
             <RefreshCw size={12} />
           </button>
+          <LanguageSwitcher />
         </div>
       </header>
 
-      {/* POS Screen */}
       {screen === 'pos' && (
         <div className="flex-1 flex flex-col items-center justify-center px-6 py-12 animate-fade-in">
           <div className="w-full max-w-sm space-y-6">
             <div className="bg-panel border border-border rounded-2xl p-6 space-y-2">
               <label className="text-text-dim text-xs font-mono uppercase tracking-widest">
-                Amount (ZMW)
+                {t.amountLabel}
               </label>
               <div className="flex items-center gap-2">
                 <span className="text-2xl font-display text-text-dim">K</span>
@@ -142,7 +121,7 @@ export default function POSPage() {
                   type="number"
                   value={zmwInput}
                   onChange={e => setZmwInput(e.target.value)}
-                  placeholder="0.00"
+                  placeholder={t.amountPlaceholder}
                   className="flex-1 bg-transparent text-4xl font-display font-bold text-text outline-none placeholder:text-border"
                   autoFocus
                 />
@@ -150,28 +129,26 @@ export default function POSPage() {
               <div className="pt-2 border-t border-border flex items-center gap-2">
                 <Zap size={12} className="text-bitcoin" fill="#F7931A" />
                 <span className="font-mono text-sm text-bitcoin">
-                  {satsAmount > 0 ? satsAmount.toLocaleString() : '—'} sats
+                  {satsAmount > 0 ? satsAmount.toLocaleString() : '—'} {t.sats}
                 </span>
               </div>
             </div>
 
             <div className="bg-panel border border-border rounded-2xl p-4 space-y-1">
               <label className="text-text-dim text-xs font-mono uppercase tracking-widest">
-                Memo (optional)
+                {t.memoLabel}
               </label>
               <input
                 type="text"
                 value={memo}
                 onChange={e => setMemo(e.target.value)}
-                placeholder="e.g. Tomatoes x3"
+                placeholder={t.memoPlaceholder}
                 className="w-full bg-transparent text-text font-body text-base outline-none placeholder:text-muted"
                 maxLength={80}
               />
             </div>
 
-            {error && (
-              <p className="text-red-400 text-sm font-mono text-center">{error}</p>
-            )}
+            {error && <p className="text-red-400 text-sm font-mono text-center">{error}</p>}
 
             <button
               onClick={handleCharge}
@@ -185,7 +162,7 @@ export default function POSPage() {
               ) : (
                 <>
                   <Zap size={18} fill="currentColor" />
-                  Charge {zmwAmount > 0 ? `K ${zmwAmount.toFixed(2)}` : ''}
+                  {t.chargeButton} {zmwAmount > 0 ? `K ${zmwAmount.toFixed(2)}` : ''}
                   <ChevronRight size={18} />
                 </>
               )}
@@ -194,58 +171,42 @@ export default function POSPage() {
         </div>
       )}
 
-      {/* Invoice / QR Screen */}
       {screen === 'invoice' && invoice && (
         <div className="flex-1 flex flex-col items-center justify-center px-6 py-8 animate-slide-up">
           <div className="w-full max-w-sm space-y-5">
-            <button onClick={handleCancel} className="flex items-center gap-1 text-text-dim text-sm hover:text-text transition-colors">
-              <X size={14} /> Cancel
+            <button onClick={() => { setInvoice(null); setScreen('pos') }}
+              className="flex items-center gap-1 text-text-dim text-sm hover:text-text transition-colors">
+              <X size={14} /> {t.cancel}
             </button>
             <div className="bg-panel border border-border rounded-2xl p-5 space-y-1">
-              <p className="text-text-dim text-xs font-mono uppercase tracking-widest">Awaiting Payment</p>
+              <p className="text-text-dim text-xs font-mono uppercase tracking-widest">{t.awaitingPayment}</p>
               <p className="font-display font-bold text-3xl text-text">K {invoice.amount_zmw.toFixed(2)}</p>
               <div className="flex items-center gap-1 text-bitcoin font-mono text-sm">
                 <Zap size={12} fill="#F7931A" />
-                {invoice.amount_sats.toLocaleString()} sats
+                {invoice.amount_sats.toLocaleString()} {t.sats}
               </div>
               {invoice.memo && invoice.memo !== 'ZamPOS Payment' && (
                 <p className="text-text-dim text-xs mt-1">{invoice.memo}</p>
               )}
             </div>
             <div className="bg-white rounded-2xl p-5 flex items-center justify-center mx-auto">
-              <QRCodeSVG
-                value={invoice.payment_request}
-                size={220}
-                bgColor="#ffffff"
-                fgColor="#0F0F0F"
-                level="M"
-              />
+              <QRCodeSVG value={invoice.payment_request} size={220} bgColor="#ffffff" fgColor="#0F0F0F" level="M" />
             </div>
             <div className="flex items-center justify-center gap-2 text-text-dim text-sm font-mono">
-              {paymentPolling && (
-                <>
-                  <Clock size={13} className="animate-pulse text-bitcoin" />
-                  Waiting for payment…
-                </>
-              )}
+              {paymentPolling && <><Clock size={13} className="animate-pulse text-bitcoin" />{t.waitingForPayment}</>}
             </div>
             <div className="bg-panel border border-border rounded-xl p-3">
-              <p className="text-text-dim text-xs font-mono uppercase tracking-widest mb-1">Lightning Invoice</p>
-              <p className="text-text-dim text-xs font-mono break-all line-clamp-2">
-                {invoice.payment_request}
-              </p>
-              <button
-                onClick={() => navigator.clipboard.writeText(invoice.payment_request)}
-                className="mt-2 text-bitcoin text-xs font-mono hover:underline"
-              >
-                Copy invoice
+              <p className="text-text-dim text-xs font-mono uppercase tracking-widest mb-1">{t.lightningInvoice}</p>
+              <p className="text-text-dim text-xs font-mono break-all line-clamp-2">{invoice.payment_request}</p>
+              <button onClick={() => navigator.clipboard.writeText(invoice.payment_request)}
+                className="mt-2 text-bitcoin text-xs font-mono hover:underline">
+                {t.copyInvoice}
               </button>
             </div>
           </div>
         </div>
       )}
 
-      {/* Success Screen */}
       {screen === 'success' && invoice && (
         <div className="flex-1 flex flex-col items-center justify-center px-6 py-12 animate-fade-in">
           <div className="w-full max-w-sm space-y-6 text-center">
@@ -253,32 +214,30 @@ export default function POSPage() {
               <CheckCircle size={72} className="text-bitcoin" fill="#F7931A" />
             </div>
             <div>
-              <p className="font-display font-bold text-4xl text-text">Paid!</p>
-              <p className="text-text-dim font-mono text-sm mt-1">Payment confirmed ✓</p>
+              <p className="font-display font-bold text-4xl text-text">{t.paid}</p>
+              <p className="text-text-dim font-mono text-sm mt-1">{t.paymentConfirmed}</p>
             </div>
             <div className="bg-panel border border-border rounded-2xl p-5 text-left space-y-2">
               <div className="flex justify-between font-mono text-sm">
-                <span className="text-text-dim">Amount</span>
+                <span className="text-text-dim">{t.amount}</span>
                 <span className="text-text font-medium">K {invoice.amount_zmw.toFixed(2)}</span>
               </div>
               <div className="flex justify-between font-mono text-sm">
-                <span className="text-text-dim">Sats received</span>
-                <span className="text-bitcoin">{invoice.amount_sats.toLocaleString()} sats</span>
+                <span className="text-text-dim">{t.satsReceived}</span>
+                <span className="text-bitcoin">{invoice.amount_sats.toLocaleString()} {t.sats}</span>
               </div>
               {invoice.memo && invoice.memo !== 'ZamPOS Payment' && (
                 <div className="flex justify-between font-mono text-sm">
-                  <span className="text-text-dim">Memo</span>
+                  <span className="text-text-dim">{t.memo}</span>
                   <span className="text-text">{invoice.memo}</span>
                 </div>
               )}
             </div>
-            <button
-              onClick={handleNewSale}
+            <button onClick={handleNewSale}
               className="w-full bg-bitcoin hover:bg-bitcoin-dark text-surface font-display font-bold text-lg
-                         rounded-2xl py-5 flex items-center justify-center gap-2 transition-all active:scale-95"
-            >
+                         rounded-2xl py-5 flex items-center justify-center gap-2 transition-all active:scale-95">
               <Zap size={18} fill="currentColor" />
-              New Sale
+              {t.newSale}
             </button>
           </div>
         </div>
