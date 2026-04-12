@@ -7,4 +7,5 @@ uvicorn main:app --reload
 //npm run dev
 
 //ngrok
+//ngrok http 3000
 //ngrok http 8000
