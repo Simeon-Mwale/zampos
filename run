@@ -1,5 +1,10 @@
 //backend
+//cd C:\Dev\zampos\backend
+venv\Scripts\activate
 uvicorn main:app --reload
 
 //frontend 
-npm run dev
+//npm run dev
+
+//ngrok
+//ngrok http 8000
