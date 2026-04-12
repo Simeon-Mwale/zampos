@@ -4,15 +4,19 @@ from contextlib import asynccontextmanager
 import os
 from dotenv import load_dotenv
 
-from routers import invoice, price, webhook
-
 load_dotenv()
+
+from routers import invoice, price, webhook, transactions
+from database import init_db
+
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     print("🚀 ZamPOS backend starting...")
+    init_db()
     yield
     print("🛑 ZamPOS backend shutting down...")
+
 
 app = FastAPI(
     title="ZamPOS API",
@@ -32,10 +36,13 @@ app.add_middleware(
 app.include_router(price.router, prefix="/price", tags=["Price"])
 app.include_router(invoice.router, prefix="/invoice", tags=["Invoice"])
 app.include_router(webhook.router, prefix="/webhook", tags=["Webhook"])
+app.include_router(transactions.router, prefix="/transactions", tags=["Transactions"])
+
 
 @app.get("/")
 async def root():
     return {"status": "ok", "app": "ZamPOS", "version": "0.1.0"}
+
 
 @app.get("/health")
 async def health():

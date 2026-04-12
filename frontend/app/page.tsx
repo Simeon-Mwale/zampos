@@ -1,7 +1,8 @@
 'use client'
 
 import { useState, useEffect, useCallback } from 'react'
-import { Zap, RefreshCw, ChevronRight, X, CheckCircle, Clock } from 'lucide-react'
+import { Zap, RefreshCw, ChevronRight, X, CheckCircle, Clock, LayoutDashboard } from 'lucide-react'
+import Link from 'next/link'
 import { QRCodeSVG } from 'qrcode.react'
 import { getRate, createInvoice, checkPaymentStatus } from '@/lib/api'
 import type { InvoiceResponse, RateResponse } from '@/lib/api'
@@ -29,6 +30,7 @@ export default function POSPage() {
       setRateLoading(true)
       const r = await getRate()
       setRate(r)
+      setError('')
     } catch {
       setError('Could not fetch exchange rate. Check your connection.')
     } finally {
@@ -42,7 +44,6 @@ export default function POSPage() {
     return () => clearInterval(interval)
   }, [fetchRate])
 
-  // Poll for payment when invoice screen is open
   useEffect(() => {
     if (screen !== 'invoice' || !invoice) return
     setPaymentPolling(true)
@@ -101,9 +102,16 @@ export default function POSPage() {
     <main className="min-h-screen bg-surface flex flex-col">
       {/* Header */}
       <header className="border-b border-border px-6 py-4 flex items-center justify-between">
-        <div className="flex items-center gap-2">
+        <div className="flex items-center gap-3">
           <Zap className="text-bitcoin" size={22} fill="#F7931A" />
           <span className="font-display font-bold text-lg tracking-tight text-text">ZamPOS</span>
+          <Link
+            href="/dashboard"
+            className="text-text-dim hover:text-bitcoin transition-colors ml-1"
+            title="Dashboard"
+          >
+            <LayoutDashboard size={16} />
+          </Link>
         </div>
         <div className="flex items-center gap-2 text-text-dim text-sm font-mono">
           {rateLoading ? (
@@ -124,8 +132,6 @@ export default function POSPage() {
       {screen === 'pos' && (
         <div className="flex-1 flex flex-col items-center justify-center px-6 py-12 animate-fade-in">
           <div className="w-full max-w-sm space-y-6">
-
-            {/* Amount input */}
             <div className="bg-panel border border-border rounded-2xl p-6 space-y-2">
               <label className="text-text-dim text-xs font-mono uppercase tracking-widest">
                 Amount (ZMW)
@@ -141,7 +147,6 @@ export default function POSPage() {
                   autoFocus
                 />
               </div>
-              {/* Sats equivalent */}
               <div className="pt-2 border-t border-border flex items-center gap-2">
                 <Zap size={12} className="text-bitcoin" fill="#F7931A" />
                 <span className="font-mono text-sm text-bitcoin">
@@ -150,7 +155,6 @@ export default function POSPage() {
               </div>
             </div>
 
-            {/* Memo input */}
             <div className="bg-panel border border-border rounded-2xl p-4 space-y-1">
               <label className="text-text-dim text-xs font-mono uppercase tracking-widest">
                 Memo (optional)
@@ -165,12 +169,10 @@ export default function POSPage() {
               />
             </div>
 
-            {/* Error */}
             {error && (
               <p className="text-red-400 text-sm font-mono text-center">{error}</p>
             )}
 
-            {/* Charge button */}
             <button
               onClick={handleCharge}
               disabled={loading || !zmwAmount}
@@ -196,13 +198,9 @@ export default function POSPage() {
       {screen === 'invoice' && invoice && (
         <div className="flex-1 flex flex-col items-center justify-center px-6 py-8 animate-slide-up">
           <div className="w-full max-w-sm space-y-5">
-
-            {/* Cancel */}
             <button onClick={handleCancel} className="flex items-center gap-1 text-text-dim text-sm hover:text-text transition-colors">
               <X size={14} /> Cancel
             </button>
-
-            {/* Amount summary */}
             <div className="bg-panel border border-border rounded-2xl p-5 space-y-1">
               <p className="text-text-dim text-xs font-mono uppercase tracking-widest">Awaiting Payment</p>
               <p className="font-display font-bold text-3xl text-text">K {invoice.amount_zmw.toFixed(2)}</p>
@@ -214,8 +212,6 @@ export default function POSPage() {
                 <p className="text-text-dim text-xs mt-1">{invoice.memo}</p>
               )}
             </div>
-
-            {/* QR Code */}
             <div className="bg-white rounded-2xl p-5 flex items-center justify-center mx-auto">
               <QRCodeSVG
                 value={invoice.payment_request}
@@ -225,18 +221,14 @@ export default function POSPage() {
                 level="M"
               />
             </div>
-
-            {/* Polling status */}
             <div className="flex items-center justify-center gap-2 text-text-dim text-sm font-mono">
-              {paymentPolling ? (
+              {paymentPolling && (
                 <>
                   <Clock size={13} className="animate-pulse text-bitcoin" />
                   Waiting for payment…
                 </>
-              ) : null}
+              )}
             </div>
-
-            {/* BOLT11 string */}
             <div className="bg-panel border border-border rounded-xl p-3">
               <p className="text-text-dim text-xs font-mono uppercase tracking-widest mb-1">Lightning Invoice</p>
               <p className="text-text-dim text-xs font-mono break-all line-clamp-2">

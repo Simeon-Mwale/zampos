@@ -55,3 +55,24 @@ export const checkPaymentStatus = async (
   const { data } = await api.get(`/invoice/status/${payment_hash}`)
   return data
 }
+
+export interface Transaction {
+  id: number
+  payment_hash: string
+  amount_zmw: number
+  amount_sats: number
+  memo: string
+  status: 'pending' | 'paid' | 'expired'
+  created_at: string
+  paid_at: string | null
+}
+
+export const getTransactions = async (limit = 50): Promise<Transaction[]> => {
+  const { data } = await api.get('/transactions/', { params: { limit } })
+  return data
+}
+
+export const getTransactionSummary = async () => {
+  const { data } = await api.get('/transactions/summary')
+  return data
+}
