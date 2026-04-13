@@ -197,13 +197,13 @@ export default function Dashboard() {
           </div>
           <button
             onClick={() => setSweepStep('confirm')}
-            disabled={!balance || balance <= 10}
+            disabled={!balance || balance <= 0}
             className="w-full bg-bitcoin hover:bg-bitcoin-dark disabled:opacity-40 disabled:cursor-not-allowed
                        text-surface font-display font-bold rounded-xl py-3
                        flex items-center justify-center gap-2 transition-all active:scale-95"
           >
             <LogOut size={16} />
-            End Day & Withdraw {balance && balance > 10 ? `${balance.toLocaleString()} sats` : ''}
+            End Day & Withdraw {balance && balance > 0 ? `${balance.toLocaleString()} sats` : ''}
           </button>
         </div>
 
