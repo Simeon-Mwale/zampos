@@ -6,7 +6,7 @@ from dotenv import load_dotenv
 
 load_dotenv()
 
-from routers import invoice, price, webhook, transactions
+from routers import invoice, price, webhook, transactions, sweep
 from database import init_db
 
 
@@ -33,10 +33,11 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-app.include_router(price.router, prefix="/price", tags=["Price"])
-app.include_router(invoice.router, prefix="/invoice", tags=["Invoice"])
-app.include_router(webhook.router, prefix="/webhook", tags=["Webhook"])
+app.include_router(price.router,        prefix="/price",        tags=["Price"])
+app.include_router(invoice.router,      prefix="/invoice",      tags=["Invoice"])
+app.include_router(webhook.router,      prefix="/webhook",      tags=["Webhook"])
 app.include_router(transactions.router, prefix="/transactions", tags=["Transactions"])
+app.include_router(sweep.router,        prefix="/sweep",        tags=["Sweep"])
 
 
 @app.get("/")

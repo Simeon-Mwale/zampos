@@ -4,7 +4,8 @@ venv\Scripts\activate
 uvicorn main:app --reload
 
 //frontend 
-//npm run dev
+//cd C:\Dev\zampos\frontend
+npm run dev
 
 //ngrok
 //ngrok http 3000
