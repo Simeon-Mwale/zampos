@@ -1,19 +1,21 @@
 'use client'
 
 import { useState, useEffect, useCallback } from 'react'
-import { Zap, RefreshCw, ChevronRight, X, CheckCircle, Clock, LayoutDashboard } from 'lucide-react'
+import { Zap, RefreshCw, ChevronRight, X, CheckCircle, Clock, LayoutDashboard, Settings, Store } from 'lucide-react'
 import Link from 'next/link'
 import { QRCodeSVG } from 'qrcode.react'
-import { getRate, createInvoice, checkPaymentStatus } from '@/lib/api'
-import type { InvoiceResponse, RateResponse } from '@/lib/api'
+import { getRate, createInvoice, checkPaymentStatus, registerMerchant } from '@/lib/api'
+import type { InvoiceResponse, RateResponse, MerchantRegisterResponse } from '@/lib/api'
 import { useLanguage } from '@/context/LanguageContext'
 import LanguageSwitcher from '@/components/LanguageSwitcher'
 import PWAInstallPrompt from '@/components/PWAInstallPrompt'
 
-type Screen = 'pos' | 'invoice' | 'success'
+type Screen = 'pos' | 'invoice' | 'success' | 'onboarding'
 
 export default function POSPage() {
   const { t } = useLanguage()
+  
+  // POS State
   const [zmwInput, setZmwInput] = useState('')
   const [memo, setMemo] = useState('')
   const [rate, setRate] = useState<RateResponse | null>(null)
@@ -23,12 +25,25 @@ export default function POSPage() {
   const [loading, setLoading] = useState(false)
   const [error, setError] = useState('')
   const [paymentPolling, setPaymentPolling] = useState(false)
+  
+  // Onboarding State
+  const [shopName, setShopName] = useState('')
+  const [location, setLocation] = useState('')
+  const [registering, setRegistering] = useState(false)
 
   const zmwAmount = parseFloat(zmwInput) || 0
   const satsAmount = rate && zmwAmount > 0
     ? Math.max(1, Math.round((zmwAmount / rate.zmw_per_btc) * 100_000_000))
     : 0
 
+  // 🔁 Check if merchant is configured
+  const isMerchantConfigured = (): boolean => {
+    const mid = localStorage.getItem('zampos-merchant-id')
+    const key = localStorage.getItem('zampos-invoice-key')
+    return !!(mid && parseInt(mid) > 0 && key)
+  }
+
+  // 🔁 Fetch BTC/ZMW rate
   const fetchRate = useCallback(async () => {
     try {
       setRateLoading(true)
@@ -42,12 +57,17 @@ export default function POSPage() {
     }
   }, [t])
 
+  // 🔄 Auto-check onboarding on mount
   useEffect(() => {
+    if (!isMerchantConfigured()) {
+      setScreen('onboarding')
+    }
     fetchRate()
     const interval = setInterval(fetchRate, 60_000)
     return () => clearInterval(interval)
   }, [fetchRate])
 
+  // 🔍 Poll payment status
   useEffect(() => {
     if (screen !== 'invoice' || !invoice) return
     setPaymentPolling(true)
@@ -64,16 +84,63 @@ export default function POSPage() {
     return () => { clearInterval(poll); setPaymentPolling(false) }
   }, [screen, invoice])
 
+  // ⚡ Register merchant (Shop Name → Auto ID)
+  const handleRegister = async () => {
+    if (!shopName.trim() || shopName.trim().length < 2) {
+      setError('Please enter your shop name (min 2 characters)')
+      return
+    }
+    
+    setError('')
+    setRegistering(true)
+    
+    try {
+      const result: MerchantRegisterResponse = await registerMerchant(
+        shopName.trim(),
+        location.trim() || undefined
+      )
+      
+      // 💾 Save to localStorage for offline/PWA use
+      localStorage.setItem('zampos-merchant-id', result.merchant_id.toString())
+      localStorage.setItem('zampos-invoice-key', result.invoice_key)
+      localStorage.setItem('zampos-shop-name', result.shop_name)
+      
+      // 🎉 Redirect to POS
+      setScreen('pos')
+      fetchRate() // Refresh rate now that we're active
+      
+    } catch (err: any) {
+      console.error('Registration failed:', err)
+      setError(err?.response?.data?.detail || 'Failed to register. Check connection and try again.')
+    } finally {
+      setRegistering(false)
+    }
+  }
+
+  // ⚡ Create invoice (POS flow)
   const handleCharge = async () => {
-    if (!zmwAmount || zmwAmount <= 0) { setError(t.errorAmount); return }
+    if (!zmwAmount || zmwAmount <= 0) { 
+      setError(t.errorAmount); 
+      return 
+    }
+    
+    if (!isMerchantConfigured()) {
+      setScreen('onboarding')
+      return
+    }
+
+    const merchantId = parseInt(localStorage.getItem('zampos-merchant-id')!)
+    
     setError('')
     setLoading(true)
+    
     try {
-      const inv = await createInvoice(zmwAmount, memo || 'ZamPOS Payment')
+      const inv = await createInvoice(zmwAmount, memo || 'ZamPOS Payment', merchantId)
       setInvoice(inv)
       setScreen('invoice')
-    } catch {
-      setError(t.errorInvoice)
+    } catch (err: any) {
+      console.error('Invoice creation failed:', err)
+      setError(err?.response?.data?.detail || t.errorInvoice)
     } finally {
       setLoading(false)
     }
@@ -83,6 +150,109 @@ export default function POSPage() {
     setZmwInput(''); setMemo(''); setInvoice(null); setError(''); setScreen('pos')
   }
 
+  // 🎨 ONBOARDING SCREEN
+  if (screen === 'onboarding') {
+    return (
+      <main className="min-h-screen bg-surface flex flex-col">
+        <header className="border-b border-border px-6 py-4 flex items-center justify-between">
+          <div className="flex items-center gap-3">
+            <Zap className="text-bitcoin" size={22} fill="#F7931A" />
+            <span className="font-display font-bold text-lg tracking-tight text-text">{t.appName}</span>
+          </div>
+          <LanguageSwitcher />
+        </header>
+
+        <div className="flex-1 flex flex-col items-center justify-center px-6 py-8 animate-fade-in">
+          <div className="w-full max-w-sm space-y-6">
+            
+            {/* Welcome Header */}
+            <div className="text-center space-y-2">
+              <div className="inline-flex items-center justify-center w-16 h-16 rounded-2xl bg-bitcoin/10 mb-2">
+                <Store size={28} className="text-bitcoin" />
+              </div>
+              <h1 className="font-display font-bold text-2xl text-text">Welcome to ZamPOS ⚡</h1>
+              <p className="text-text-dim font-body">
+                Enter your shop name to start accepting Bitcoin Lightning payments.
+              </p>
+            </div>
+
+            {/* Shop Name Input */}
+            <div className="bg-panel border border-border rounded-2xl p-5 space-y-4">
+              <div className="space-y-1">
+                <label className="text-text-dim text-xs font-mono uppercase tracking-widest">
+                  Shop Name *
+                </label>
+                <input
+                  type="text"
+                  value={shopName}
+                  onChange={e => setShopName(e.target.value)}
+                  placeholder="e.g., Mama Ntemba's Groundnuts"
+                  className="w-full bg-surface border border-border rounded-xl px-4 py-3 text-text font-body text-lg outline-none focus:border-bitcoin transition-colors placeholder:text-muted"
+                  autoFocus
+                  maxLength={100}
+                  onKeyDown={e => e.key === 'Enter' && handleRegister()}
+                />
+              </div>
+
+              <div className="space-y-1">
+                <label className="text-text-dim text-xs font-mono uppercase tracking-widest">
+                  Location <span className="text-muted">(optional)</span>
+                </label>
+                <input
+                  type="text"
+                  value={location}
+                  onChange={e => setLocation(e.target.value)}
+                  placeholder="e.g., Soweto Market, Lusaka"
+                  className="w-full bg-surface border border-border rounded-xl px-4 py-3 text-text font-body outline-none focus:border-bitcoin transition-colors placeholder:text-muted"
+                  maxLength={200}
+                />
+              </div>
+
+              {error && (
+                <p className="text-red-400 text-sm font-mono text-center bg-red-400/10 rounded-lg p-2">
+                  {error}
+                </p>
+              )}
+
+              <button
+                onClick={handleRegister}
+                disabled={registering || !shopName.trim() || shopName.trim().length < 2}
+                className="w-full bg-bitcoin hover:bg-bitcoin-dark disabled:opacity-40 disabled:cursor-not-allowed
+                           text-surface font-display font-bold text-lg rounded-2xl py-4
+                           flex items-center justify-center gap-2 transition-all active:scale-95"
+              >
+                {registering ? (
+                  <>
+                    <RefreshCw size={18} className="animate-spin" />
+                    Setting up your wallet...
+                  </>
+                ) : (
+                  <>
+                    <Zap size={18} fill="currentColor" />
+                    Start Selling ⚡
+                  </>
+                )}
+              </button>
+            </div>
+
+            {/* Help Text */}
+            <div className="text-center space-y-2">
+              <p className="text-text-dim text-xs font-mono">
+                🔐 Your wallet is created automatically. No tech skills needed.
+              </p>
+              <p className="text-muted text-xs font-mono">
+                By continuing, you agree to ZamPOS Terms. Your invoice key is stored locally on this device.
+              </p>
+            </div>
+
+          </div>
+        </div>
+        <PWAInstallPrompt />
+      </main>
+    )
+  }
+
+  // 🎨 POS / INVOICE / SUCCESS SCREENS (original code, unchanged)
   return (
     <main className="min-h-screen bg-surface flex flex-col">
       <header className="border-b border-border px-6 py-4 flex items-center justify-between">
@@ -104,6 +274,14 @@ export default function POSPage() {
           ) : null}
           <button onClick={fetchRate} className="text-muted hover:text-bitcoin transition-colors">
             <RefreshCw size={12} />
+          </button>
+          {/* Settings button to re-open onboarding if needed */}
+          <button 
+            onClick={() => setScreen('onboarding')}
+            className="text-text-dim hover:text-bitcoin transition-colors p-1"
+            title="Shop Settings"
+          >
+            <Settings size={16} />
           </button>
           <LanguageSwitcher />
         </div>

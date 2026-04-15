@@ -1,0 +1,26 @@
+{
+  "wallets": [
+    {
+      "id": "a38569658b24472c86e1c75e6a6be61b",
+      "adminkey": "48b8423ea48c44e0aa4058c62de1a03c",
+      "inkey": "af435a352ff2486793747912abfa2954",
+      "assigned": true,
+      "merchant_id": 1,
+      "assigned_at": "2026-04-15T20:44:24.941575"
+    },
+    {
+      "id": "wallet_002",
+      "adminkey": "PASTE_ADMIN_KEY_002_HERE",
+      "inkey": "PASTE_INVOICE_KEY_002_HERE",
+      "assigned": false,
+      "merchant_id": null
+    },
+    {
+      "id": "wallet_003",
+      "adminkey": "PASTE_ADMIN_KEY_003_HERE",
+      "inkey": "PASTE_INVOICE_KEY_003_HERE",
+      "assigned": false,
+      "merchant_id": null
+    }
+  ]
+}
