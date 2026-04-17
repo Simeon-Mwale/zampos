@@ -1,10 +1,23 @@
+# Backend
+cd C:\Dev\zampos\backend
+venv\Scripts\activate
+uvicorn main:app --reload --host 0.0.0.0 --port 8000
+
+# Frontend (NEW terminal)
+cd C:\Dev\zampos\frontend
+rmdir /s /q .next  # Clear Next.js cache
+npm run dev
+
+
+
 //Windows (Docker)
 cd C:\Dev\zampos\lnbits
+cd /mnt/c/Dev/zampos/lnbits
 docker-compose up -d
 
-//USE WSL
-cd /mnt/c/Dev/zampos/backend
-source venv/bin/activate
+//USE backend
+
+venv\Scripts\activate
 uvicorn main:app --reload --host 0.0.0.0 --port 8000
 
 //frontend 

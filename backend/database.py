@@ -1,258 +1,328 @@
-import sqlite3
+# backend/database.py — Production-Ready SQLite Layer for ZamPOS (with rate_snapshot support)
+import aiosqlite
 import os
-import json
-from datetime import datetime
+import json  # ✅ Added for JSON serialization
+from datetime import datetime, timezone
+from typing import Optional, List, Dict, Any
+import logging
 
-DB_PATH = os.getenv("DATABASE_PATH", "./zampos.db")
-WALLET_POOL_PATH = os.getenv("WALLET_POOL_PATH", "./config/wallet_pool.json")
+logger = logging.getLogger(__name__)
 
+# Database path with fallback
+DB_PATH = os.getenv("DATABASE_PATH", "./data/zampos.db")
 
-# ------------------------
-# CONNECTION
-# ------------------------
-
-def get_conn():
-    conn = sqlite3.connect(DB_PATH)
-    conn.row_factory = sqlite3.Row
-    return conn
-
-
-# ------------------------
-# INIT DB
-# ------------------------
-
-def init_db():
-    """Create tables if they don't exist."""
-    conn = get_conn()
-
-    # 🏪 Merchants table
-    conn.execute("""
-        CREATE TABLE IF NOT EXISTS merchants (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            name TEXT NOT NULL,
-            location TEXT,
-            wallet_id TEXT,
-            admin_key TEXT,
-            invoice_key TEXT NOT NULL,
-            created_at TEXT DEFAULT (datetime('now')),
-            UNIQUE(invoice_key)
-        )
-    """)
-
-    # 💳 Transactions table
-    conn.execute("""
-        CREATE TABLE IF NOT EXISTS transactions (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            payment_hash TEXT UNIQUE NOT NULL,
-            amount_zmw REAL NOT NULL,
-            amount_sats INTEGER NOT NULL,
-            memo TEXT DEFAULT '',
-            status TEXT DEFAULT 'pending',
-            merchant_id INTEGER,
-            created_at TEXT DEFAULT (datetime('now')),
-            paid_at TEXT,
-            FOREIGN KEY (merchant_id) REFERENCES merchants(id)
-        )
-    """)
-
-    conn.commit()
-    conn.close()
-    print("[DB] Database initialized ✓")
-
-
-# ------------------------
-# MERCHANTS
-# ------------------------
-
-def save_merchant(name: str, wallet_id: str, admin_key: str, invoice_key: str, location: str = None) -> int:
-    """Save new merchant to DB. Returns the newly created merchant_id."""
-    conn = get_conn()
-    try:
-        cursor = conn.execute(
-            """INSERT INTO merchants (name, location, wallet_id, admin_key, invoice_key)
-               VALUES (?, ?, ?, ?, ?)""",
-            (name, location, wallet_id, admin_key, invoice_key),
-        )
-        conn.commit()
-        return cursor.lastrowid
-    finally:
-        conn.close()
-
-
-def get_merchant_by_id(merchant_id: int):
-    conn = get_conn()
-    try:
-        row = conn.execute("SELECT * FROM merchants WHERE id = ?", (merchant_id,)).fetchone()
-        return dict(row) if row else None
-    finally:
-        conn.close()
-
-
-def get_merchant_by_invoice_key(invoice_key: str):
-    """Lookup merchant by their invoice key (for webhook validation)"""
-    conn = get_conn()
-    try:
-        row = conn.execute("SELECT * FROM merchants WHERE invoice_key = ?", (invoice_key,)).fetchone()
-        return dict(row) if row else None
-    finally:
-        conn.close()
-
-
-def get_all_merchants():
-    conn = get_conn()
-    try:
-        rows = conn.execute("SELECT id, name, location, created_at FROM merchants ORDER BY created_at DESC").fetchall()
-        return [dict(row) for row in rows]
-    finally:
-        conn.close()
-
-
-# ------------------------
-# WALLET POOL FUNCTIONS (NEW — FOR MERCHANT REGISTRATION)
-# ------------------------
-
-def _load_wallet_pool():
-    """Load wallet pool JSON file"""
-    if not os.path.exists(WALLET_POOL_PATH):
-        raise RuntimeError(f"Wallet pool file not found: {WALLET_POOL_PATH}")
-    with open(WALLET_POOL_PATH, "r") as f:
-        return json.load(f)
-
-
-def _save_wallet_pool(pool):
-    """Save wallet pool JSON file"""
-    os.makedirs(os.path.dirname(WALLET_POOL_PATH) or ".", exist_ok=True)
-    with open(WALLET_POOL_PATH, "w") as f:
-        json.dump(pool, f, indent=2)
-
-
-def get_available_wallet_from_pool():
+async def init_db():
     """
-    Get next unassigned wallet from pool.
-    Returns wallet dict or raises RuntimeError if none available.
+    Initialize SQLite database with required tables.
+    ✅ Added rate_snapshot column for locked FX rate data
     """
-    pool = _load_wallet_pool()
-    for wallet in pool["wallets"]:
-        if not wallet.get("assigned", False):
-            return wallet.copy()  # Return copy to avoid modifying original
-    raise RuntimeError(
-        "No available wallets in pool. "
-        f"Add more wallets to {WALLET_POOL_PATH} or create new wallets in LNBits Admin UI."
-    )
-
-
-def mark_wallet_assigned(wallet_inkey: str, merchant_id: int):
-    """Mark a wallet as assigned to a merchant"""
-    pool = _load_wallet_pool()
-    for wallet in pool["wallets"]:
-        if wallet["inkey"] == wallet_inkey:
-            wallet["assigned"] = True
-            wallet["merchant_id"] = merchant_id
-            wallet["assigned_at"] = datetime.now().isoformat()
-            break
-    _save_wallet_pool(pool)
-    print(f"[WalletPool] Assigned {wallet_inkey[:8]}... to merchant {merchant_id}")
-
-
-def get_wallet_by_inkey(inkey: str):
-    """Lookup wallet by invoice key (for webhook validation)"""
-    pool = _load_wallet_pool()
-    for wallet in pool["wallets"]:
-        if wallet["inkey"] == inkey:
-            return wallet
-    return None
-
-
-# ------------------------
-# TRANSACTIONS
-# ------------------------
-
-def save_transaction(payment_hash: str, amount_zmw: float, amount_sats: int, memo: str, merchant_id: int):
-    conn = get_conn()
     try:
-        conn.execute(
-            """INSERT OR IGNORE INTO transactions
-               (payment_hash, amount_zmw, amount_sats, memo, status, merchant_id)
-               VALUES (?, ?, ?, ?, 'pending', ?)""",
-            (payment_hash, amount_zmw, amount_sats, memo, merchant_id)
-        )
-        conn.commit()
-    finally:
-        conn.close()
+        # Ensure data directory exists
+        db_dir = os.path.dirname(DB_PATH)
+        if db_dir:
+            os.makedirs(db_dir, exist_ok=True)
+        
+        async with aiosqlite.connect(DB_PATH) as db:
+            # Enable foreign keys (SQLite requires this per-connection)
+            await db.execute("PRAGMA foreign_keys = ON")
+            
+            # Create merchants table
+            await db.execute("""
+                CREATE TABLE IF NOT EXISTS merchants (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    shop_name TEXT NOT NULL,
+                    location TEXT,
+                    node_id TEXT NOT NULL,
+                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    UNIQUE(shop_name, location)
+                )
+            """)
+            
+            # Create transactions table with rate_snapshot column ✅
+            await db.execute("""
+                CREATE TABLE IF NOT EXISTS transactions (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    payment_hash TEXT NOT NULL UNIQUE,
+                    merchant_id INTEGER NOT NULL,
+                    amount_zmw REAL NOT NULL,
+                    amount_sats INTEGER NOT NULL,
+                    memo TEXT,
+                    status TEXT CHECK(status IN ('pending', 'paid', 'expired')) DEFAULT 'pending',
+                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    paid_at TIMESTAMP,
+                    rate_snapshot TEXT,  -- ✅ NEW: JSON string storing locked rate data
+                    FOREIGN KEY (merchant_id) REFERENCES merchants(id)
+                )
+            """)
+            
+            # ✅ Create indexes SEPARATELY (SQLite requirement)
+            await db.execute("""
+                CREATE INDEX IF NOT EXISTS idx_payment_hash 
+                ON transactions(payment_hash)
+            """)
+            await db.execute("""
+                CREATE INDEX IF NOT EXISTS idx_merchant_status 
+                ON transactions(merchant_id, status)
+            """)
+            await db.execute("""
+                CREATE INDEX IF NOT EXISTS idx_created_at 
+                ON transactions(created_at DESC)
+            """)
+            
+            await db.commit()
+            logger.info(f"✅ Database initialized at {DB_PATH}")
+            
+    except Exception as e:
+        logger.error(f"❌ Database initialization failed: {e}", exc_info=True)
+        raise
 
 
-def mark_paid(payment_hash: str):
-    conn = get_conn()
+# ✅ Helper: Parse rate_snapshot from JSON string to dict
+def _parse_rate_snapshot(raw: Optional[str]) -> Optional[Dict[str, Any]]:
+    """Safely parse rate_snapshot JSON string from DB"""
+    if not raw:
+        return None
     try:
-        conn.execute(
-            """UPDATE transactions SET status = 'paid', paid_at = datetime('now') WHERE payment_hash = ?""",
-            (payment_hash,)
-        )
-        conn.commit()
-    finally:
-        conn.close()
+        return json.loads(raw)
+    except (json.JSONDecodeError, TypeError):
+        logger.warning(f"⚠️ Failed to parse rate_snapshot: {raw[:50]}...")
+        return None
 
 
-def get_transactions(limit: int = 50):
-    conn = get_conn()
+async def get_merchant_by_id(merchant_id: int) -> Optional[Dict[str, Any]]:
+    """Fetch merchant by ID with proper error handling"""
     try:
-        rows = conn.execute(
-            """SELECT t.*, m.name as merchant_name
-               FROM transactions t
-               LEFT JOIN merchants m ON t.merchant_id = m.id
-               ORDER BY t.created_at DESC LIMIT ?""",
-            (limit,)
-        ).fetchall()
-        return [dict(row) for row in rows]
-    finally:
-        conn.close()
+        async with aiosqlite.connect(DB_PATH) as db:
+            db.row_factory = aiosqlite.Row
+            cursor = await db.execute(
+                "SELECT id, shop_name, location, node_id, created_at FROM merchants WHERE id = ?",
+                (merchant_id,)
+            )
+            row = await cursor.fetchone()
+            return dict(row) if row else None
+    except Exception as e:
+        logger.error(f"❌ Failed to fetch merchant {merchant_id}: {e}")
+        return None
 
 
-def get_transactions_by_merchant(merchant_id: int, limit: int = 50):
-    conn = get_conn()
+async def create_merchant(shop_name: str, location: Optional[str] = None) -> Dict[str, Any]:
+    """
+    Register new merchant.
+    All merchants share the org-level Voltage node (multi-tenant design).
+    """
     try:
-        rows = conn.execute(
-            """SELECT * FROM transactions WHERE merchant_id = ? ORDER BY created_at DESC LIMIT ?""",
-            (merchant_id, limit)
-        ).fetchall()
-        return [dict(row) for row in rows]
-    finally:
-        conn.close()
+        async with aiosqlite.connect(DB_PATH) as db:
+            # Use Voltage Org ID as node identifier (all merchants share one node)
+            node_id = os.getenv("VOLTAGE_ORG_ID", "zampos_default")
+            
+            cursor = await db.execute(
+                """INSERT INTO merchants (shop_name, location, node_id) 
+                   VALUES (?, ?, ?)""",
+                (shop_name.strip(), location.strip() if location else None, node_id)
+            )
+            merchant_id = cursor.lastrowid
+            await db.commit()
+            
+            logger.info(f"✅ Merchant registered: {shop_name} (ID: {merchant_id})")
+            
+            return {
+                "merchant_id": merchant_id,
+                "shop_name": shop_name.strip(),
+                "location": location.strip() if location else None,
+                # Mask API key for frontend display (never expose full key)
+                "invoice_key": (os.getenv("VOLTAGE_API_KEY", "")[:12] + "...") if os.getenv("VOLTAGE_API_KEY") else "",
+                "wallet_id": f"node_{node_id}",
+                "created_at": datetime.now(timezone.utc).isoformat()
+            }
+    except aiosqlite.IntegrityError:
+        logger.warning(f"⚠️ Duplicate merchant registration attempt: {shop_name}")
+        raise ValueError(f"Shop '{shop_name}' already registered")
+    except Exception as e:
+        logger.error(f"❌ Failed to create merchant: {e}", exc_info=True)
+        raise
 
 
-# ------------------------
-# ANALYTICS
-# ------------------------
-
-def get_daily_totals(days: int = 7):
-    conn = get_conn()
+async def save_transaction(
+    payment_hash: str,
+    merchant_id: int,
+    amount_zmw: float,
+    amount_sats: int,
+    memo: str,
+    rate_snapshot: Optional[Dict[str, Any]] = None  # ✅ NEW optional parameter
+) -> bool:
+    """
+    Save new pending transaction with optional locked rate snapshot.
+    Returns True if saved, False if failed (non-critical — invoice already created).
+    """
     try:
-        rows = conn.execute(
-            """SELECT date(paid_at) as day, COUNT(*) as count,
-                      SUM(amount_zmw) as total_zmw, SUM(amount_sats) as total_sats
-               FROM transactions WHERE status = 'paid'
-                 AND paid_at >= datetime('now', ? || ' days')
-               GROUP BY date(paid_at) ORDER BY day DESC""",
-            (f"-{days}",)
-        ).fetchall()
-        return [dict(row) for row in rows]
-    finally:
-        conn.close()
+        async with aiosqlite.connect(DB_PATH) as db:
+            # ✅ Serialize rate_snapshot dict to JSON string for storage
+            rate_snapshot_json = json.dumps(rate_snapshot) if rate_snapshot else None
+            
+            await db.execute(
+                """INSERT INTO transactions 
+                   (payment_hash, merchant_id, amount_zmw, amount_sats, memo, status, rate_snapshot)
+                   VALUES (?, ?, ?, ?, ?, 'pending', ?)""",
+                (payment_hash, merchant_id, amount_zmw, amount_sats, memo.strip(), rate_snapshot_json)
+            )
+            await db.commit()
+            logger.debug(f"💾 Transaction saved: {payment_hash[:12]}...")
+            return True
+    except aiosqlite.IntegrityError:
+        # Payment hash already exists — idempotent, not an error
+        logger.debug(f"⚠️ Transaction already exists: {payment_hash[:12]}...")
+        return True
+    except Exception as e:
+        logger.error(f"❌ Failed to save transaction {payment_hash[:12]}...: {e}")
+        # Non-critical: invoice was already created on Voltage
+        return False
 
 
-def get_summary():
-    conn = get_conn()
+async def mark_paid(payment_hash: str) -> bool:
+    """Mark transaction as paid with UTC timestamp"""
     try:
-        today = conn.execute(
-            """SELECT COUNT(*) as count, COALESCE(SUM(amount_zmw),0) as zmw,
-                      COALESCE(SUM(amount_sats),0) as sats
-               FROM transactions WHERE status = 'paid' AND date(paid_at) = date('now')"""
-        ).fetchone()
-        all_time = conn.execute(
-            """SELECT COUNT(*) as count, COALESCE(SUM(amount_zmw),0) as zmw,
-                      COALESCE(SUM(amount_sats),0) as sats
-               FROM transactions WHERE status = 'paid'"""
-        ).fetchone()
-        return {"today": dict(today), "all_time": dict(all_time)}
-    finally:
-        conn.close()
+        async with aiosqlite.connect(DB_PATH) as db:
+            result = await db.execute(
+                "UPDATE transactions SET status = 'paid', paid_at = ? WHERE payment_hash = ?",
+                (datetime.now(timezone.utc), payment_hash)
+            )
+            await db.commit()
+            
+            if result.rowcount > 0:
+                logger.info(f"✅ Payment confirmed: {payment_hash[:12]}...")
+                return True
+            else:
+                logger.warning(f"⚠️ No transaction found to mark paid: {payment_hash[:12]}...")
+                return False
+    except Exception as e:
+        logger.error(f"❌ Failed to mark paid {payment_hash[:12]}...: {e}")
+        return False
+
+
+async def get_transaction_by_hash(payment_hash: str) -> Optional[Dict[str, Any]]:
+    """Fetch single transaction by payment hash — with rate_snapshot parsed ✅"""
+    try:
+        async with aiosqlite.connect(DB_PATH) as db:
+            db.row_factory = aiosqlite.Row
+            cursor = await db.execute(
+                """SELECT id, payment_hash, merchant_id, amount_zmw, amount_sats, 
+                          memo, status, created_at, paid_at, rate_snapshot 
+                   FROM transactions WHERE payment_hash = ?""",
+                (payment_hash,)
+            )
+            row = await cursor.fetchone()
+            if row:
+                result = dict(row)
+                # ✅ Parse rate_snapshot from JSON string back to dict
+                result["rate_snapshot"] = _parse_rate_snapshot(result.get("rate_snapshot"))
+                return result
+            return None
+    except Exception as e:
+        logger.error(f"❌ Failed to fetch transaction {payment_hash[:12]}...: {e}")
+        return None
+
+
+async def get_merchant_transactions(
+    merchant_id: int, 
+    limit: int = 50,
+    status: Optional[str] = None
+) -> List[Dict[str, Any]]:
+    """
+    Get transactions for a merchant with optional status filter.
+    Optimized for dashboard pagination — with rate_snapshot parsed ✅
+    """
+    try:
+        async with aiosqlite.connect(DB_PATH) as db:
+            db.row_factory = aiosqlite.Row
+            query = """
+                SELECT id, payment_hash, amount_zmw, amount_sats, memo, 
+                       status, created_at, paid_at, rate_snapshot 
+                FROM transactions 
+                WHERE merchant_id = ?
+            """
+            params: List[Any] = [merchant_id]
+            
+            if status and status in ('pending', 'paid', 'expired'):
+                query += " AND status = ?"
+                params.append(status)
+                
+            query += " ORDER BY created_at DESC LIMIT ?"
+            params.append(limit)
+            
+            cursor = await db.execute(query, params)
+            rows = await cursor.fetchall()
+            
+            # ✅ Parse rate_snapshot for each transaction
+            results = []
+            for row in rows:
+                result = dict(row)
+                result["rate_snapshot"] = _parse_rate_snapshot(result.get("rate_snapshot"))
+                results.append(result)
+            return results
+            
+    except Exception as e:
+        logger.error(f"❌ Failed to fetch transactions for merchant {merchant_id}: {e}")
+        return []
+
+
+async def get_transaction_summary(merchant_id: Optional[int] = None) -> Dict[str, Any]:
+    """
+    Get sales summary: total ZMW, total sats, transaction counts.
+    Optional merchant_id filter for per-merchant stats.
+    """
+    try:
+        async with aiosqlite.connect(DB_PATH) as db:
+            db.row_factory = aiosqlite.Row
+            
+            if merchant_id:
+                cursor = await db.execute("""
+                    SELECT 
+                        COUNT(*) as total_count,
+                        COUNT(CASE WHEN status = 'paid' THEN 1 END) as paid_count,
+                        COALESCE(SUM(CASE WHEN status = 'paid' THEN amount_zmw END), 0) as total_zmw,
+                        COALESCE(SUM(CASE WHEN status = 'paid' THEN amount_sats END), 0) as total_sats
+                    FROM transactions 
+                    WHERE merchant_id = ?
+                """, (merchant_id,))
+            else:
+                cursor = await db.execute("""
+                    SELECT 
+                        COUNT(*) as total_count,
+                        COUNT(CASE WHEN status = 'paid' THEN 1 END) as paid_count,
+                        COALESCE(SUM(CASE WHEN status = 'paid' THEN amount_zmw END), 0) as total_zmw,
+                        COALESCE(SUM(CASE WHEN status = 'paid' THEN amount_sats END), 0) as total_sats
+                    FROM transactions
+                """)
+            
+            row = await cursor.fetchone()
+            return dict(row) if row else {
+                "total_count": 0, "paid_count": 0, "total_zmw": 0, "total_sats": 0
+            }
+    except Exception as e:
+        logger.error(f"❌ Failed to fetch transaction summary: {e}")
+        return {"total_count": 0, "paid_count": 0, "total_zmw": 0, "total_sats": 0}
+
+
+async def cleanup_expired_transactions(expiry_minutes: int = 30) -> int:
+    """
+    Mark unpaid invoices as 'expired' after timeout.
+    Run periodically via background task or cron.
+    Zambia-optimized: 30 min default for low-connectivity areas.
+    """
+    try:
+        async with aiosqlite.connect(DB_PATH) as db:
+            cutoff = datetime.now(timezone.utc).timestamp() - (expiry_minutes * 60)
+            result = await db.execute("""
+                UPDATE transactions 
+                SET status = 'expired' 
+                WHERE status = 'pending' 
+                AND created_at < datetime(?, 'unixepoch')
+            """, (cutoff,))
+            await db.commit()
+            
+            if result.rowcount > 0:
+                logger.info(f"🧹 Cleaned up {result.rowcount} expired transactions")
+            return result.rowcount
+    except Exception as e:
+        logger.error(f"❌ Failed to cleanup expired transactions: {e}")
+        return 0
