@@ -319,6 +319,33 @@ async def get_merchant(merchant_id: int):
         raise HTTPException(status_code=404, detail="Merchant not found")
     return merchant
 
+# ── Add these routes to backend/router.py ─────────────────────────────────────
+# Place them after the existing /merchant routes
+
+@router.get("/owner/earnings")
+async def owner_earnings():
+    """Platform owner: total gas fees collected across all merchants"""
+    from services.fee_engine import get_total_fees_collected
+    return await get_total_fees_collected()
+
+
+@router.get("/owner/merchants")
+async def owner_merchants():
+    """Platform owner: list all registered merchants"""
+    try:
+        async with aiosqlite.connect(DB_PATH) as db:
+            db.row_factory = aiosqlite.Row
+            cursor = await db.execute("""
+                SELECT id, shop_name, location, created_at
+                FROM merchants
+                ORDER BY created_at DESC
+            """)
+            rows = await cursor.fetchall()
+            return {"merchants": [dict(r) for r in rows], "total": len(rows)}
+    except Exception as e:
+        logger.error(f"❌ Failed to fetch merchants: {e}")
+        raise HTTPException(status_code=502, detail="Failed to fetch merchants")
+
 # ------------------------
 # Routes: Invoice Endpoints
 # ------------------------
