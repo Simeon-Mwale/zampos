@@ -30,8 +30,11 @@ export function LanguageProvider({ children }: { children: ReactNode }) {
     localStorage.setItem('zampos-lang', lang)
   }
 
+  // Cast to Translations so TS stops complaining about literal type mismatches
+  const t = translations[language] as unknown as Translations
+
   return (
-    <LanguageContext.Provider value={{ language, setLanguage, t: translations[language] }}>
+    <LanguageContext.Provider value={{ language, setLanguage, t }}>
       {children}
     </LanguageContext.Provider>
   )
