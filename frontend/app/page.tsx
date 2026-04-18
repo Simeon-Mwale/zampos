@@ -313,7 +313,7 @@ export default function POSPage() {
               <span className="text-bitcoin">₿</span>
               <span>{formatLargeNumber(rate.zmw_per_btc)} ZMW</span>
               {rate.source === 'fallback' && (
-                <AlertCircle size={12} className="text-amber-400" title={rate.warning} />
+                <span title={rate.warning}><AlertCircle size={12} className="text-amber-400" /></span>
               )}
             </>
           ) : (
