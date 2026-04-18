@@ -1,3 +1,4 @@
+from services.fees import calculate_withdrawal_fee, record_fee, PLATFORM_WITHDRAWAL_FEE_SATS
 # backend/router.py — Updated for live ZMW→USD→BTC→sats flow
 from fastapi import APIRouter, HTTPException, Request, BackgroundTasks, Query
 from pydantic import BaseModel, Field, validator
@@ -85,6 +86,180 @@ async def get_exchange_rate(refresh: bool = Query(False, description="Force fres
             "cache_valid": False,
             "warning": "Using emergency fallback rates"
         }
+# ------------------------
+# Routes: Sweep/Withdrawal Endpoints (with fee collection)
+# ------------------------
+
+@router.get("/sweep/balance")
+async def get_sweep_balance(merchant_id: int = Query(..., gt=0)):
+    """Get merchant's available balance for withdrawal"""
+    try:
+        merchant = await get_merchant_by_id(merchant_id)
+        if not merchant:
+            raise HTTPException(status_code=404, detail="Merchant not found")
+        
+        # Get paid transactions for this merchant
+        async with aiosqlite.connect(DB_PATH) as db:
+            db.row_factory = aiosqlite.Row
+            cursor = await db.execute("""
+                SELECT SUM(amount_sats) as total_sats, COUNT(*) as count
+                FROM transactions 
+                WHERE merchant_id = ? AND status = 'paid'
+            """, (merchant_id,))
+            row = await cursor.fetchone()
+            
+            total_sats = row["total_sats"] or 0
+            
+            # Check for previous withdrawals
+            cursor = await db.execute("""
+                SELECT SUM(amount_sats) as withdrawn_sats
+                FROM withdrawals 
+                WHERE merchant_id = ? AND status = 'completed'
+            """, (merchant_id,))
+            withdrawn = await cursor.fetchone()
+            withdrawn_sats = withdrawn["withdrawn_sats"] or 0
+            
+            available_sats = max(0, total_sats - withdrawn_sats)
+            
+            return {
+                "total_sats": total_sats,
+                "withdrawn_sats": withdrawn_sats,
+                "available_sats": available_sats
+            }
+    except Exception as e:
+        logger.error(f"❌ Balance fetch failed: {e}")
+        raise HTTPException(status_code=502, detail="Failed to fetch balance")
+
+
+@router.get("/sweep/estimate")
+async def estimate_sweep_fee(
+    merchant_id: int = Query(..., gt=0),
+    amount_sats: int = Query(..., gt=0)
+):
+    """Estimate withdrawal fee for given amount"""
+    try:
+        merchant = await get_merchant_by_id(merchant_id)
+        if not merchant:
+            raise HTTPException(status_code=404, detail="Merchant not found")
+        
+        fee_calc = await calculate_withdrawal_fee(amount_sats, merchant_id)
+        
+        return {
+            "gross_sats": amount_sats,
+            "fee_sats": fee_calc["fee_amount"],
+            "net_sats": fee_calc["net_amount"],
+            "fee_percentage": fee_calc["fee_percentage"]
+        }
+    except Exception as e:
+        logger.error(f"❌ Fee estimate failed: {e}")
+        raise HTTPException(status_code=502, detail="Failed to estimate fee")
+
+
+@router.post("/sweep/send")
+async def send_sweep(req: BaseModel, background_tasks: BackgroundTasks):
+    """
+    Send withdrawal to merchant's Lightning Address (WOS/Phoenix).
+    Deducts platform fee and records it for owner earnings.
+    """
+    # Parse request manually since we didn't define a model
+    data = await req.json() if hasattr(req, 'json') else req.__dict__
+    
+    merchant_id = data.get('merchant_id')
+    lightning_address = data.get('lightning_address')
+    amount_sats = data.get('amount_sats')
+    
+    if not all([merchant_id, lightning_address, amount_sats]):
+        raise HTTPException(status_code=400, detail="Missing required fields")
+    
+    # Verify merchant
+    merchant = await get_merchant_by_id(merchant_id)
+    if not merchant:
+        raise HTTPException(status_code=404, detail="Merchant not found")
+    
+    # Validate Lightning Address format
+    if '@' not in lightning_address:
+        raise HTTPException(status_code=400, detail="Invalid Lightning Address format")
+    
+    try:
+        # Calculate fee
+        fee_calc = await calculate_withdrawal_fee(amount_sats, merchant_id)
+        net_sats = fee_calc["net_amount"]
+        fee_sats = fee_calc["fee_amount"]
+        
+        if net_sats <= 0:
+            raise HTTPException(status_code=400, detail="Amount too small after fees")
+        
+        # Create invoice from merchant's Lightning Address
+        # Note: In production, use a proper LNURL-pay or BOLT11 decoder
+        # For WOS/Phoenix, we can use their API or a relay service
+        async with httpx.AsyncClient(timeout=30.0) as client:
+            # Try to get invoice from Lightning Address
+            # This is simplified - in production use proper LNURL flow
+            lnurl = lightning_address.replace('@', '@lnurl.')
+            resp = await client.get(f"https://{lnurl}")
+            
+            if resp.status_code != 200:
+                # Fallback: assume it's a direct invoice
+                payment_request = lightning_address
+            else:
+                # Parse LNURL response (simplified)
+                lnurl_data = resp.json()
+                callback = lnurl_data.get('callback')
+                if callback:
+                    # Request actual invoice
+                    invoice_resp = await client.get(callback, params={
+                        'amount': net_sats * 1000,  # millisats
+                        'comment': 'ZamPOS End Day Withdrawal'
+                    })
+                    payment_request = invoice_resp.json().get('pr', '')
+                else:
+                    payment_request = lightning_address
+        
+        # Send payment via Voltage
+        from services.voltage import send_payment  # You'll need to implement this
+        payment_result = await send_payment(
+            payment_request=payment_request,
+            amount_sats=net_sats,
+            timeout_seconds=60
+        )
+        
+        if not payment_result.get('success'):
+            raise Exception(f"Payment failed: {payment_result.get('error')}")
+        
+        # Record withdrawal in DB
+        async with aiosqlite.connect(DB_PATH) as db:
+            await db.execute("""
+                INSERT INTO withdrawals 
+                (merchant_id, amount_sats, withdrawal_type, destination, tx_id, status, fee_sats)
+                VALUES (?, ?, 'lightning', ?, ?, 'completed', ?)
+            """, (merchant_id, amount_sats, lightning_address, payment_result.get('payment_hash'), fee_sats))
+            await db.commit()
+        
+        # 💰 Record platform fee for OWNER earnings
+        await record_fee(
+            merchant_id=merchant_id,
+            fee_type="withdrawal",
+            amount_sats=fee_sats,
+            amount_zmw=None
+        )
+        
+        logger.info(f"✅ Sweep completed: {merchant_id} → {lightning_address} | {net_sats} sats | Fee: {fee_sats} sats")
+        
+        return {
+            "success": True,
+            "lightning_address": lightning_address,
+            "gross_sats": amount_sats,
+            "fee_sats": fee_sats,
+            "net_sats": net_sats,
+            "payment_hash": payment_result.get('payment_hash'),
+            "message": f"Withdrawal complete! {net_sats} sats sent to {lightning_address}"
+        }
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"❌ Sweep failed: {e}", exc_info=True)
+        raise HTTPException(status_code=502, detail=f"Withdrawal failed: {str(e)}")        
 
 @router.get("/price/convert")
 async def convert_price(zmw: float, refresh: bool = Query(False)):
