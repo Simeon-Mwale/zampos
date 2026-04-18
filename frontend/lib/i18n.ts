@@ -41,6 +41,7 @@ export const translations = {
     errorInvoice: 'Failed to create invoice. Check backend connection.',
     pending: 'pending',
     sats: 'sats',
+    btcAmount: "BTC Amount",
   },
   ny: {
     appName: 'ZamPOS',
@@ -75,6 +76,7 @@ export const translations = {
     errorInvoice: 'Kulephera kupanga inivoyisi.',
     pending: 'ikudikira',
     sats: 'sats',
+    btcAmount: "BTC Amount",
   },
   bem: {
     appName: 'ZamPOS',
@@ -109,6 +111,7 @@ export const translations = {
     errorInvoice: 'Kwipwa ukupanga invoice.',
     pending: 'alindila',
     sats: 'sats',
+    btcAmount: "BTC Amount",
   },
   sw: {
     appName: 'ZamPOS',
@@ -143,6 +146,7 @@ export const translations = {
     errorInvoice: 'Imeshindwa kuunda ankara.',
     pending: 'inasubiri',
     sats: 'sats',
+    btcAmount: "BTC Amount",
   },
 } as const
 

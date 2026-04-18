@@ -504,7 +504,7 @@ export default function POSPage() {
                 <span className="text-bitcoin">{invoice.amount_sats.toLocaleString()} {t.sats}</span>
               </div>
               <div className="flex justify-between font-mono text-sm">
-                <span className="text-text-dim">{t.btcAmount}</span>
+                <span className="text-text-dim">BTC Amount</span>
                 <span className="text-text">{invoice.btc_amount} ₿</span>
               </div>
               {invoice.memo && invoice.memo !== 'ZamPOS Payment' && (
