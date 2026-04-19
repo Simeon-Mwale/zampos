@@ -10,350 +10,219 @@
 ![Languages](https://img.shields.io/badge/Languages-EN%20%7C%20NY%20%7C%20BEM%20%7C%20SW-blue)
 ![Status: Production Ready](https://img.shields.io/badge/Status-Production%20Ready-brightgreen)
 
+# ZamPOS ⚡🇿🇲
+
+> Bitcoin Lightning Point-of-Sale for informal market traders in Zambia and sub-Saharan Africa.
+
+**Live demo:** https://zampos.vercel.app  
+**Built by:** [@Simeon-Mwale](https://github.com/Simeon-Mwale) — CS Student, Lusaka, Zambia
+
 ---
 
-## 🌍 The Problem
+## The Problem
 
-Zambia has one of the largest informal economies in sub-Saharan Africa. Street vendors, market traders, and small shop owners transact billions of kwacha annually — yet they are almost entirely excluded from digital payment infrastructure.
+Zambia's informal economy is massive. Market vendors, street traders, and small shop owners transact billions of kwacha every year — yet they are almost entirely locked out of digital payments.
 
-Existing Bitcoin/Lightning POS tools are built for the Global North: they assume stable internet, modern smartphones, and USD pricing. They don't work for a market trader in Lusaka's Soweto Market pricing goods in ZMW on a low-end Android device.
+Existing Bitcoin POS tools are built for the Global North. They assume fast internet, modern hardware, and USD pricing. They don't work for a trader at Soweto Market pricing tomatoes in ZMW on a Tecno Spark.
 
 **ZamPOS is built specifically for that trader.**
 
 ---
 
-## ⚡ What It Does
+## What It Does
 
-- **ZMW → Sats conversion** — Enter a price in Zambian Kwacha, get the sats equivalent in real time via live CoinGecko exchange rate
-- **Lightning Invoice + QR Code** — Generates a payable Lightning invoice instantly via Voltage Cloud, displayed as a scannable QR code
-- **Automatic payment confirmation** — Detects when payment is received via webhook and shows a clear success screen
-- **Transaction history dashboard** — Daily and all-time sales in both ZMW and sats, with full transaction log
-- **Multi-language support** — English, Chinyanja, Ichibemba, Kiswahili — switchable in one tap
-- **PWA** — Installable directly on Android home screen, works offline with queued invoice sync
-- **No Docker required** — Pure Python/Node.js stack, deploy anywhere (Vercel, Render, Railway, VPS)
-
----
-
-## ✅ Status — Production Ready
-
-ZamPOS is fully functional and deployed with **Voltage Cloud** infrastructure. The first real end-to-end Lightning mainnet payment was processed on **April 12, 2026** from Lusaka, Zambia:
-
-- Wallet: Wallet of Satoshi
-- Status: **PAID** ✅
-- Note: ZamPOS Payment
-- Location: Lusaka, Zambia 🇿🇲
-- Infrastructure: Voltage Cloud Mainnet Node
+- **ZMW → sats** — Enter any price in Zambian Kwacha. Get the live sats equivalent instantly via CoinGecko rates
+- **Lightning invoice + QR** — Generates a payable BOLT11 invoice in seconds via Voltage Cloud
+- **Auto payment confirmation** — Detects payment via webhook, shows clear success screen
+- **Works globally** — Merchant prices in ZMW, customer pays from any Lightning wallet anywhere in the world 🌍
+- **Dashboard** — Daily and all-time sales in ZMW and sats, full transaction log
+- **4 languages** — English, Chinyanja, Ichibemba, Kiswahili — one tap to switch
+- **PWA** — Installs on Android home screen like a native app, works offline
+- **No bank account needed** — Just a Lightning wallet and a phone
 
 ---
 
-## 🛠️ Tech Stack
+## Screenshots
+
+> Register your shop → Enter amount in ZMW → Customer scans QR → Paid ✅
+
+---
+
+## Tech Stack
 
 | Layer | Technology |
 |---|---|
 | Frontend | Next.js 14 + TypeScript + Tailwind CSS + PWA |
-| Backend | Python 3.10+ + FastAPI + AsyncIO |
-| Lightning | **Voltage Cloud API** (Mutinynet for dev, Mainnet for prod) |
-| Database | SQLite (async aiosqlite) — zero-config, file-based |
-| Price Feed | CoinGecko API (ZMW/BTC live rate with caching) |
-| Languages | English, Chinyanja, Ichibemba, Kiswahili |
-| Deployment | Vercel (frontend) + Render/Railway (backend) — no Docker |
+| Backend | Python 3.12 + FastAPI + AsyncIO |
+| Lightning | Voltage Cloud (LND REST API) |
+| Database | SQLite via aiosqlite — zero config |
+| Rates | CoinGecko API (live ZMW/BTC with 45s cache) |
+| Deploy | Vercel (frontend) + Render (backend) |
 | License | MIT |
 
 ---
 
-## 🚀 Getting Started (No Docker)
+## Quick Start
 
 ### Prerequisites
-
-- Node.js 18+ (for frontend)
-- Python 3.10+ (for backend)
+- Node.js 18+
+- Python 3.12+
 - [Voltage Cloud](https://voltage.cloud) account (free tier works)
-- A public URL for webhooks (ngrok for local dev, or deploy to Render)
 
-### 1. Clone the repo
-
+### 1. Clone
 ```bash
 git clone https://github.com/Simeon-Mwale/zampos.git
 cd zampos
 ```
 
-### 2. Set up Voltage Cloud
-
-1. Sign up at [voltage.cloud](https://voltage.cloud)
-2. Create an Organization → copy your `ORG_ID`
-3. Generate an API Key with scopes: `invoices:write`, `invoices:read`, `webhooks:receive`
-4. Create a Node:
-   - **Development**: Network = `mutinynet`, enable REST + webhooks
-   - **Production**: Network = `mainnet`, fund with sats, enable all features
-5. (Optional) Configure webhook endpoint: `https://your-backend-url/api/webhook/voltage`
-
-### 3. Set up the backend
-
+### 2. Backend
 ```bash
 cd backend
 python -m venv venv
-source venv/bin/activate        # Windows: venv\Scripts\activate
+venv\Scripts\activate        # Windows
+# source venv/bin/activate   # Mac/Linux
+
 pip install -r requirements.txt
-
-# Copy and configure environment variables
-cp .env.example .env
-# Edit .env with your Voltage credentials (see below)
-
-# Initialize database and start server
-python -c "from database import init_db; import asyncio; asyncio.run(init_db())"
-uvicorn main:app --reload --host 0.0.0.0 --port 8000
+cp .env.example .env         # Fill in your credentials
+uvicorn main:app --reload --port 8000
 ```
 
-### 4. Set up the frontend
-
+### 3. Frontend
 ```bash
 cd frontend
 npm install
-
-# Configure environment
 cp .env.example .env.local
-# Edit .env.local: set NEXT_PUBLIC_API_URL to your backend URL
-
+# Set NEXT_PUBLIC_API_URL=http://localhost:8000
 npm run dev
 ```
 
-Open [http://localhost:3000](http://localhost:3000) to see the app.
+Open http://localhost:3000
 
-### 5. Environment Variables Reference
+---
 
-#### Backend (`backend/.env`)
+## Environment Variables
 
-```bash
-# ⚡ Voltage Cloud (REQUIRED)
-VOLTAGE_API_URL=https://api.voltage.cloud
-VOLTAGE_API_KEY=your_voltage_api_key_here
-VOLTAGE_ORG_ID=your_org_id_here
-VOLTAGE_NETWORK=mutinynet  # Switch to 'mainnet' for production
+### Backend `.env`
+```env
+# Voltage Cloud LND Node
+NODE_REST_HOST=your-node.voltageapp.io
+NODE_MACAROON_HEX=your-macaroon-hex
 
-# 🌐 App Configuration
+# Database
 DATABASE_PATH=./data/zampos.db
-FRONTEND_URL=https://zampos.zm  # Your production frontend URL
-WEBHOOK_URL=https://your-backend-url/api/webhook/voltage  # Public webhook endpoint
-ENVIRONMENT=development  # Switch to 'production' for mainnet
 
-# 💱 Rate Service
-RATE_API_URL=https://api.coingecko.com/api/v3
-RATE_CACHE_SECONDS=60
+# Rates
+FX_API_KEY=your-exchangerate-api-key
+COINGECKO_API_KEY=your-coingecko-demo-key
 
-# 🔐 Security
-API_SECRET_KEY=generate_with_python_secrets_token_urlsafe_32
-CORS_ORIGINS=https://zampos.zm,https://www.zampos.zm,http://localhost:3000
+# Phoenix wallet (owner sweep destination)
+OWNER_LIGHTNING_ADDRESS=you@phoenixwallet.me
+GAS_FEE_SATS=50
 
-# 📡 Optional: Monitoring
-LOG_LEVEL=INFO
-WEBHOOK_SECRET=optional_hmac_secret_for_webhook_verification
+# App
+ENVIRONMENT=production
+CORS_ORIGINS=https://your-frontend.vercel.app
+WEBHOOK_SECRET=your-secret
 ```
 
-#### Frontend (`frontend/.env.local`)
-
-```bash
-NEXT_PUBLIC_API_URL=http://localhost:8000  # Point to your backend
-NEXT_PUBLIC_APP_URL=http://localhost:3000
+### Frontend `.env.local`
+```env
+NEXT_PUBLIC_API_URL=https://your-backend.onrender.com
+NEXT_PUBLIC_OWNER_KEY=your-owner-key
 ```
-
-> 🔐 **Never commit `.env` files**. Use `python -c "import secrets; print(secrets.token_urlsafe(32))"` to generate secure keys.
 
 ---
 
-## 🧪 Testing Flow (Mutinynet)
+## Deploy (Free)
 
-1. **Fund your test wallet**: Visit https://mutinynet.com/faucet and send test sats to any address
-2. **Register a merchant**: Open ZamPOS, enter shop name (e.g., "Mama Ntemba's Groundnuts")
-3. **Create an invoice**: Enter amount in ZMW (e.g., K10), tap "Charge"
-4. **Pay the invoice**: Scan QR with a Mutinynet-compatible wallet (Breez test mode, Zeus testnet, or mutinynet.com/wallet)
-5. **Verify confirmation**: POS screen auto-updates to "Paid ✅" within 3-10 seconds
+### Frontend → Vercel
+1. Import repo at vercel.com
+2. Set root directory: `frontend`
+3. Add env: `NEXT_PUBLIC_API_URL=https://your-backend.onrender.com`
+4. Deploy ✅
 
-> 💡 Tip: Use https://webhook.site to inspect webhook payloads during development.
+### Backend → Render
+1. New Web Service at render.com
+2. Root directory: `backend`
+3. Build: `pip install -r requirements.txt`
+4. Start: `uvicorn main:app --host 0.0.0.0 --port $PORT`
+5. Add all env variables
+6. Deploy ✅
 
----
-
-## 🌐 Deployment Guide
-
-### Option A: Vercel + Render (Recommended for starters)
-
-#### Backend on Render
-1. Create new Web Service on [render.com](https://render.com)
-2. Connect your GitHub repo, set root directory to `backend/`
-3. Build command: `pip install -r requirements.txt`
-4. Start command: `uvicorn main:app --host 0.0.0.0 --port $PORT`
-5. Add all `backend/.env` variables in Render's Environment Variables UI
-6. Note the public URL (e.g., `https://zampos-api.onrender.com`)
-
-#### Frontend on Vercel
-1. Import project on [vercel.com](https://vercel.com)
-2. Set root directory to `frontend/`
-3. Add environment variable: `NEXT_PUBLIC_API_URL=https://zampos-api.onrender.com`
-4. Deploy — Vercel auto-detects Next.js
-
-#### Configure Voltage Webhook
+### Voltage Webhook
 In Voltage Dashboard → Webhooks:
-- URL: `https://zampos-api.onrender.com/api/webhook/voltage`
-- Events: `invoice.settled`, `invoice.expired`
-- Secret: Set `WEBHOOK_SECRET` in Render env vars (optional but recommended)
-
-### Option B: Single VPS (Ubuntu 22.04)
-
-```bash
-# Install dependencies
-sudo apt update && sudo apt install -y python3-pip python3-venv nodejs npm nginx
-
-# Clone and setup
-git clone https://github.com/Simeon-Mwale/zampos.git
-cd zampos
-
-# Backend (run as systemd service)
-cd backend
-python3 -m venv venv
-source venv/bin/activate
-pip install -r requirements.txt
-# Configure .env, then create /etc/systemd/system/zampos.service:
-# [Unit]
-# Description=ZamPOS Backend
-# After=network.target
-# [Service]
-# User=ubuntu
-# WorkingDirectory=/home/ubuntu/zampos/backend
-# Environment="PATH=/home/ubuntu/zampos/backend/venv/bin"
-# ExecStart=/home/ubuntu/zampos/backend/venv/bin/uvicorn main:app --host 0.0.0.0 --port 8000
-# Restart=always
-# [Install]
-# WantedBy=multi-user.target
-sudo systemctl enable zampos && sudo systemctl start zampos
-
-# Frontend (build + serve with PM2)
-cd ../frontend
-npm install
-NEXT_PUBLIC_API_URL=https://your-domain.com npm run build
-npm install -g pm2
-pm2 start npm --name "zampos-frontend" -- start
-pm2 save
-
-# Nginx reverse proxy
-sudo nano /etc/nginx/sites-available/zampos
-# Add proxy config for / (frontend) and /api (backend)
-sudo ln -s /etc/nginx/sites-available/zampos /etc/nginx/sites-enabled/
-sudo nginx -t && sudo systemctl reload nginx
+```
+URL: https://your-backend.onrender.com/webhook/voltage
+Secret: your-webhook-secret
 ```
 
 ---
 
-## 🇿🇲 Zambia-Specific Optimizations
-
-| Feature | Implementation | Why It Matters |
-|---------|---------------|----------------|
-| **Long invoice expiry** | `INVOICE_EXPIRY_SECONDS=1800` (30 min) | Accommodates slow/intermittent mobile networks in rural areas |
-| **Offline invoice queue** | localStorage + sync-on-reconnect in `api.ts` | Merchants can queue sales when offline; syncs when connectivity returns |
-| **Exponential backoff retries** | 3 retries with 1s/2s/4s delays in frontend + backend | Handles flaky 2G/3G connections gracefully |
-| **Low-end Android testing** | PWA tested on Tecno Spark, Itel A50 | Ensures app runs on devices common in Zambian markets |
-| **SMS fallback (planned)** | Africa's Talking integration in `webhooks.py` | Payment confirmations via SMS when data is unavailable |
-| **ZMW-first UX** | All amounts displayed in Kwacha first, sats secondary | Matches how traders think and price goods |
 
 ---
 
-## 🗺️ Roadmap
+## Zambia-Specific Features
 
-| Phase | Feature | Status |
-|---|---|---|
-| 1 | Core POS — ZMW input, live rate, Lightning invoice, QR, payment confirmation | ✅ Done |
-| 2 | Merchant dashboard — transaction history, daily/all-time totals, SQLite | ✅ Done |
-| 3 | Multi-language — English, Chinyanja, Ichibemba, Kiswahili | ✅ Done |
-| 4 | PWA — Android installable, service worker, offline queue | ✅ Done |
-| 5 | Voltage Cloud integration — no Docker, Mutinynet/Mainnet support | ✅ Done |
-| 6 | Multi-currency — TZS, KES, UGX, NGN | 🔜 Planned |
-| 7 | SMS payment confirmations via Africa's Talking | 🔜 Planned |
-| 8 | Tonga + Lozi language support | 🔜 Planned |
-| 9 | Field deployment — Lusaka informal markets pilot | 🔜 Planned |
-| 10 | Merchant onboarding via USSD (*123#) | 🔜 Planned |
-
-See [ROADMAP.md](./ROADMAP.md) for full technical details and community voting.
-
----
-
-## 📚 Documentation
-
-| Document | Description |
+| Feature | Why It Matters |
 |---|---|
-| [ROADMAP.md](./ROADMAP.md) | Full development roadmap + community priorities |
-| [docs/DEPLOYMENT.md](./docs/DEPLOYMENT.md) | Step-by-step deployment to Vercel/Render/VPS |
-| [docs/VOLTAGE_SETUP.md](./docs/VOLTAGE_SETUP.md) | Voltage Cloud configuration guide (Mutinynet → Mainnet) |
-| [docs/TUTORIAL_LIGHTNING.md](./docs/TUTORIAL_LIGHTNING.md) | Lightning Network explained for African developers |
-| [docs/CONTRIBUTING.md](./docs/CONTRIBUTING.md) | How to contribute code, translations, or field testing |
-| [docs/OFFLINE_SYNC.md](./docs/OFFLINE_SYNC.md) | How the offline invoice queue works (for low-connectivity areas) |
+| 30-min invoice expiry | Handles slow/intermittent mobile networks |
+| Offline invoice queue | Merchants queue sales when offline, sync on reconnect |
+| ZMW-first UX | Traders think and price in Kwacha |
+| Low-end Android tested | Works on Tecno Spark, Itel A50 |
+| 4 local languages | Nyanja + Bemba cover 80%+ of Zambia |
 
 ---
 
-## 🤝 Contributing
+## Roadmap
 
-Contributions welcome — especially from African developers and informal market traders.
+- [x] Core POS — ZMW input, live rate, Lightning invoice, QR, confirmation
+- [x] Merchant dashboard — transaction history, daily totals
+- [x] Multi-language — English, Chinyanja, Ichibemba, Kiswahili
+- [x] PWA — Android installable, offline queue
+- [x] Gas fee engine — automatic sweep to owner Phoenix wallet
+- [x] Owner earnings dashboard
+- [ ] Multi-currency — KES, TZS, NGN, UGX
+- [ ] SMS confirmations via Africa's Talking
+- [ ] Tonga + Lozi language support
+- [ ] USSD onboarding (*123#)
+- [ ] Lusaka informal markets pilot (Soweto, Kamwala)
 
-### We're especially looking for:
+---
 
-- **Translations** — Tonga, Lozi, French (for DRC/West Africa expansion)
-- **Field testing** — on low-end Android devices (Tecno, Itel, Samsung J-series) in Zambian markets
-- **UX feedback** — from actual informal market traders (what works, what doesn't)
-- **Lightning expertise** — help optimize invoice routing, channel management for African nodes
-- **SMS/USSD integration** — Africa's Talking, Hubtel, or local telecom APIs
+## Contributing
 
-### Quick Start for Contributors
+Contributions welcome — especially from African developers and traders.
+
+Looking for:
+- 🌍 **Translations** — Tonga, Lozi, French (DRC/West Africa)
+- 📱 **Field testing** — Low-end Android in Zambian markets
+- ⚡ **Lightning expertise** — Invoice routing optimisation for African nodes
+- 📲 **SMS/USSD** — Africa's Talking, local telecom APIs
 
 ```bash
-# Fork and clone
-git clone https://github.com/YOUR_USERNAME/zampos.git
-cd zampos
-
-# Backend dev (with auto-reload)
-cd backend && pip install -r requirements.txt
-uvicorn main:app --reload
-
-# Frontend dev
-cd frontend && npm install
-npm run dev
-
-# Run tests
-cd backend && pytest  # (add tests as we grow)
-cd frontend && npm run lint
+# Fork, clone, then:
+cd backend && uvicorn main:app --reload
+cd frontend && npm run dev
 ```
 
-See [docs/CONTRIBUTING.md](./docs/CONTRIBUTING.md) for coding standards, PR process, and community guidelines.
+---
+
+## Author
+
+**Simeon Mwale** — CS Student & Bitcoin Developer, Lusaka, Zambia  
+GitHub: [@Simeon-Mwale](https://github.com/Simeon-Mwale)
+
+Built with support from the Bitcoin Zambia community.  
+
 
 ---
 
-## 👤 Author
+## License
 
-**Simeon Mwale** — Computer Science Student & Bitcoin Developer, Lusaka, Zambia
-
-- GitHub: [@Simeon-Mwale](https://github.com/Simeon-Mwale)
-- Built with support from the Bitcoin Zambia community and open-source contributors worldwide
-
-*This project was submitted to the [OpenSats General Fund](https://opensats.org) on April 12, 2026.*
+MIT — free to use, modify, and deploy.
 
 ---
 
-## 📄 License
-
-MIT License — see [LICENSE](./LICENSE).
-
-Source code, documentation, and educational materials are freely available for access, modification, and redistribution.
-
-> ZamPOS is provided "as is" without warranty. Users are responsible for securing their own Voltage API keys, managing private keys, and complying with local financial regulations.
-
----
-
-## 🙏 Acknowledgements
-
-- [Voltage Cloud](https://voltage.cloud) — for reliable Lightning infrastructure without self-hosting complexity
-- [CoinGecko](https://coingecko.com) — for free, accurate ZMW/BTC exchange rates
-- [Africa's Talking](https://africastalking.com) — for SMS/USSD API documentation (future integration)
-- Bitcoin Zambia community — for feedback, testing, and grassroots advocacy
-- Informal market traders of Soweto Market, Lusaka — your needs inspired every line of code
-
----
-
-*Built in Lusaka, Zambia. For the informal market. For Bitcoin. 🇿🇲⚡*
+*Built in Lusaka, Zambia. For the informal market. For Bitcoin.* 🇿🇲⚡
 
 > "If you want to go fast, go alone. If you want to go far, go together." — African Proverb

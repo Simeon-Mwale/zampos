@@ -1,30 +1,22 @@
-# Backend
+# Terminal 1 - Backend
 cd C:\Dev\zampos\backend
 venv\Scripts\activate
-uvicorn main:app --reload --host 0.0.0.0 --port 8000
+python -m uvicorn main:app --reload
 
-# Frontend (NEW terminal)
+# Terminal 2 - Frontend  
 cd C:\Dev\zampos\frontend
-rmdir /s /q .next  # Clear Next.js cache
 npm run dev
 
-
-
-//Windows (Docker)
-cd C:\Dev\zampos\lnbits
-cd /mnt/c/Dev/zampos/lnbits
-docker-compose up -d
-
-//USE backend
-
-venv\Scripts\activate
-uvicorn main:app --reload --host 0.0.0.0 --port 8000
-
-//frontend 
-//cd C:\Dev\zampos\frontend
-npm run dev
-
+🚀
 //ngrok
-//ngrok http 3000
+ngrok http 3000
 //ngrok http 8000
 
+# Make your changes locally, test, then:
+git add .
+git commit -m "feat: your feature name"
+git push
+# Vercel + Render both auto-deploy 
+
+swagger
+http://127.0.0.1:8000/docs

@@ -1,4 +1,4 @@
-# backend/main.py — Updated startup logging
+# backend/main.py — ZamPOS v2
 from dotenv import load_dotenv
 load_dotenv()
 
@@ -6,91 +6,133 @@ from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from contextlib import asynccontextmanager
-import os
-import logging
+import os, logging, asyncio
+
 from database import init_db
 from router import router
 
-# Configure logging
 logging.basicConfig(
     level=os.getenv("LOG_LEVEL", "INFO"),
-    format="%(asctime)s [%(levelname)s] %(name)s: %(message)s"
+    format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
 )
+
 logger = logging.getLogger(__name__)
+
+
+# ─────────────────────────────────────────────────────────────
+# LIFESPAN
+# ─────────────────────────────────────────────────────────────
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    """Application lifespan: startup/shutdown"""
-    logger.info("🚀 Starting ZamPOS backend...")
+    logger.info("🚀 ZamPOS v2 starting...")
+    logger.info(f"   Spread:  {os.getenv('ZAMPOS_SPREAD_PCT', '0.5')}%")
+    logger.info(f"   SMS:     Africa's Talking ({os.getenv('AFRICASTALKING_USERNAME', 'sandbox')})")
+    logger.info(f"   DB:      {os.getenv('DATABASE_PATH', './data/zampos.db')}")
+
     await init_db()
     logger.info("✅ Database ready")
-    
+
+    # FIX: proper async task handling (was unsafe before)
     try:
-        # Warm up rate cache on startup (non-blocking)
         from services.rate_service import fetch_live_rates
-        import asyncio
-        asyncio.create_task(fetch_live_rates())
-        logger.info("💱 Rate cache warming initiated (ZMW→USD→BTC flow)")
+        asyncio.create_task(fetch_live_rates(force_refresh=True))
+        logger.info("💱 Rate cache warming started")
     except Exception as e:
-        logger.warning(f"⚠️ Could not warm rate cache: {e}")
-    
+        logger.warning(f"⚠️ Rate warmup failed: {e}")
+
     yield
-    
-    logger.info("🛑 Shutting down ZamPOS backend...")
+
+    logger.info("🛑 ZamPOS v2 shutting down")
+
+
+# ─────────────────────────────────────────────────────────────
+# APP
+# ─────────────────────────────────────────────────────────────
 
 app = FastAPI(
-    title="ZamPOS API",
-    description="Lightning POS backend for Zambian merchants (ZMW→USD→BTC→sats)",
-    version="1.1.0",
+    title="ZamPOS API v2",
+    description=(
+        "Lightning POS for Zambian merchants. "
+        "Invoices generated from each merchant's own Lightning Address. "
+        "Customer pays merchant directly. "
+        "SMS confirmation via Africa's Talking."
+    ),
+    version="2.0.0",
     lifespan=lifespan,
     docs_url="/docs",
     redoc_url="/redoc",
-    openapi_url="/openapi.json"
 )
 
-# CORS middleware
+
+# ─────────────────────────────────────────────────────────────
+# CORS
+# ─────────────────────────────────────────────────────────────
+
 cors_origins = os.getenv("CORS_ORIGINS", "http://localhost:3000").split(",")
+
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=[origin.strip() for origin in cors_origins],
+    allow_origins=[o.strip() for o in cors_origins],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
 
-# ✅ No prefix — routes match exactly what the frontend calls
+
+# ─────────────────────────────────────────────────────────────
+# ROUTES
+# ─────────────────────────────────────────────────────────────
+
 app.include_router(router, prefix="", tags=["zampos"])
 
-# Health check
+
+# ─────────────────────────────────────────────────────────────
+# HEALTH
+# ─────────────────────────────────────────────────────────────
+
 @app.get("/health")
-async def health_check():
+async def health():
     return {
-        "status": "healthy",
-        "network": os.getenv("VOLTAGE_NETWORK", "mutinynet"),
-        "version": "1.1.0",
-        "rate_flow": "ZMW→USD→BTC→sats"
+        "status":  "healthy",
+        "version": "2.0.0",
+        "model":   "direct-lightning-address + custodial",
+        "spread":  f"{os.getenv('ZAMPOS_SPREAD_PCT', '0.5')}%",
+        "sms":     os.getenv("AFRICASTALKING_USERNAME", "not configured"),
     }
+
 
 @app.get("/")
 async def root():
-    return {"message": "ZamPOS API running. Visit /docs for documentation."}
+    return {"message": "ZamPOS v2 API — visit /docs"}
 
-# Error handlers
+
+# ─────────────────────────────────────────────────────────────
+# ERROR HANDLERS
+# ─────────────────────────────────────────────────────────────
+
 @app.exception_handler(404)
-async def not_found_handler(request: Request, exc):
+async def not_found(request: Request, exc):
     return JSONResponse(status_code=404, content={"detail": "Endpoint not found"})
 
+
 @app.exception_handler(500)
-async def server_error_handler(request: Request, exc):
-    logger.error(f"❌ Internal server error: {exc}", exc_info=True)
+async def server_error(request: Request, exc):
+    logger.error(f"❌ 500: {exc}", exc_info=True)
     return JSONResponse(status_code=500, content={"detail": "Internal server error"})
+
+
+# ─────────────────────────────────────────────────────────────
+# ENTRYPOINT
+# ─────────────────────────────────────────────────────────────
 
 if __name__ == "__main__":
     import uvicorn
+
     uvicorn.run(
         "main:app",
         host="0.0.0.0",
         port=int(os.getenv("PORT", "8000")),
         reload=os.getenv("ENVIRONMENT") != "production",
-        log_level=os.getenv("LOG_LEVEL", "info").lower()
+        log_level=os.getenv("LOG_LEVEL", "info").lower(),
     )
