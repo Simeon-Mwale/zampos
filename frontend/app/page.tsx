@@ -408,9 +408,6 @@ export default function POSPage() {
         <div className="flex items-center gap-3">
           <Zap className="text-bitcoin" size={22} fill="#F7931A" />
           <span className="font-display font-bold text-lg tracking-tight text-text">{t.appName}</span>
-          <Link href="/dashboard" className="text-text-dim hover:text-bitcoin transition-colors ml-1">
-            <LayoutDashboard size={16} />
-          </Link>
         </div>
         <div className="flex items-center gap-3 text-text-dim text-sm font-mono">
           {rateLoading
