@@ -1,85 +1,123 @@
-// app/page.tsx — ZamPOS v2.2
+// app/page.tsx — ZamPOS v2.1: Direct + Custodial payout modes (Production Ready)
 'use client'
-import SummaryCard, { EnhancedSummaryCard } from '@/components/SummaryCard'
+
+import SummaryCard from '@/components/SummaryCard'
 import StaticQRCard from '@/components/StaticQRCard'
 import { getMerchantSummary, getMerchantTransactions } from '@/lib/api'
 import { useState, useEffect, useCallback, useRef } from 'react'
-import { Zap, RefreshCw, ChevronRight, X, CheckCircle, Clock,
-         Settings, Store, AlertCircle, Phone, Wallet, CheckCircle2, ArrowDownToLine } from 'lucide-react'
+import { 
+  Zap, RefreshCw, ChevronRight, X, CheckCircle, Clock, 
+  Settings, Store, AlertCircle, Phone, Wallet, CheckCircle2, ArrowDownToLine 
+} from 'lucide-react'
 import { QRCodeSVG } from 'qrcode.react'
-import { getRate, createInvoice, checkPaymentStatus, confirmPaid, registerMerchant, requestWithdrawal } from '@/lib/api'
-import type { InvoiceResponse, RateResponse, MerchantRegisterResponse, PayoutMode } from '@/lib/api'
+import { 
+  getRate, createInvoice, checkPaymentStatus, confirmPaid, 
+  registerMerchant, requestWithdrawal 
+} from '@/lib/api'
+import type { 
+  InvoiceResponse, RateResponse, MerchantRegisterResponse, PayoutMode 
+} from '@/lib/api'
 import { useLanguage } from '@/context/LanguageContext'
 import LanguageSwitcher from '@/components/LanguageSwitcher'
 import PWAInstallPrompt from '@/components/PWAInstallPrompt'
 import { safeCreateInvoice, getQueueLength } from '@/lib/offlineQueue'
 
+// ── Types ─────────────────────────────────────────────────────────────────────
 type Screen = 'pos' | 'invoice' | 'success' | 'onboarding' | 'withdraw'
 
-function isValidLightningAddress(addr: string) {
-  if (!addr.includes('@')) return false
-  const p = addr.split('@')
-  return p.length === 2 && p[0].length > 0 && p[1].includes('.')
+interface SummaryData {
+  total_zmw?: number
+  avg_zmw?: number
+  transaction_count?: number
+  [key: string]: any
 }
-function isValidPhone(phone: string) {
+
+// ── Validators ────────────────────────────────────────────────────────────────
+function isValidLightningAddress(addr: string): boolean {
+  if (!addr?.includes('@')) return false
+  const parts = addr.split('@')
+  return parts.length === 2 && parts[0].length > 0 && parts[1].includes('.')
+}
+
+function isValidPhone(phone: string): boolean {
   return /^\d{9,15}$/.test(phone.replace(/[\s\-\+]/g, ''))
 }
 
+// ── Main Component ────────────────────────────────────────────────────────────
 export default function POSPage() {
   const { t } = useLanguage()
-  const [summary, setSummary]           = useState<any>(null)
+  
+  // Data state
+  const [summary, setSummary] = useState<SummaryData | null>(null)
   const [transactions, setTransactions] = useState<any[]>([])
 
-  // POS
-  const [zmwInput, setZmwInput]             = useState('')
-  const [memo, setMemo]                     = useState('')
-  const [rate, setRate]                     = useState<RateResponse | null>(null)
-  const [rateLoading, setRateLoading]       = useState(true)
-  const [rateWarning, setRateWarning]       = useState<string | null>(null)
-  const [screen, setScreen]                 = useState<Screen>('onboarding')
-  const [invoice, setInvoice]               = useState<InvoiceResponse | null>(null)
-  const [loading, setLoading]               = useState(false)
-  const [error, setError]                   = useState('')
+  // POS state
+  const [zmwInput, setZmwInput] = useState('')
+  const [memo, setMemo] = useState('')
+  const [rate, setRate] = useState<RateResponse | null>(null)
+  const [rateLoading, setRateLoading] = useState(true)
+  const [rateWarning, setRateWarning] = useState<string | null>(null)
+  const [screen, setScreen] = useState<Screen>('onboarding')
+  const [invoice, setInvoice] = useState<InvoiceResponse | null>(null)
+  const [loading, setLoading] = useState(false)
+  const [error, setError] = useState('')
   const [paymentPolling, setPaymentPolling] = useState(false)
-  const [confirming, setConfirming]         = useState(false)
-  const [invoiceQueued, setInvoiceQueued]   = useState(false)
+  const [confirming, setConfirming] = useState(false)
+  const [invoiceQueued, setInvoiceQueued] = useState(false)
 
-  // Onboarding
-  const [shopName, setShopName]                 = useState('')
-  const [location, setLocation]                 = useState('')
-  const [phoneNumber, setPhoneNumber]           = useState('')
-  const [payoutMode, setPayoutMode]             = useState<PayoutMode>('direct')
+  // Onboarding state
+  const [shopName, setShopName] = useState('')
+  const [location, setLocation] = useState('')
+  const [phoneNumber, setPhoneNumber] = useState('')
+  const [payoutMode, setPayoutMode] = useState<PayoutMode>('direct')
   const [lightningAddress, setLightningAddress] = useState('')
-  const [registering, setRegistering]           = useState(false)
-  const [fieldErrors, setFieldErrors]           = useState<Record<string, string>>({})
-  const [walletDomain, setWalletDomain]         = useState<string | null>(null)
+  const [registering, setRegistering] = useState(false)
+  const [fieldErrors, setFieldErrors] = useState<Record<string, string>>({})
+  const [walletDomain, setWalletDomain] = useState<string | null>(null)
 
-  // Withdraw
+  // Withdraw state
   const [withdrawAddress, setWithdrawAddress] = useState('')
-  const [withdrawing, setWithdrawing]         = useState(false)
-  const [withdrawResult, setWithdrawResult]   = useState<string | null>(null)
+  const [withdrawing, setWithdrawing] = useState(false)
+  const [withdrawResult, setWithdrawResult] = useState<string | null>(null)
 
   const rateRef = useRef<NodeJS.Timeout | null>(null)
 
-  // Computed
+  // ── Computed Values ─────────────────────────────────────────────────────────
   const displayedRate = rate?.displayed_zmw_per_btc ?? rate?.zmw_per_btc ?? 0
-  const zmwAmount     = parseFloat(zmwInput) || 0
-  const satsAmount    = displayedRate && zmwAmount > 0 ? Math.max(1, Math.floor((zmwAmount / displayedRate) * 1e8)) : 0
-  const btcDisplay    = displayedRate && zmwAmount > 0 ? (zmwAmount / displayedRate).toFixed(8) : '0.00000000'
+  const zmwAmount = parseFloat(zmwInput) || 0
+  const satsAmount = displayedRate && zmwAmount > 0 
+    ? Math.max(1, Math.floor((zmwAmount / displayedRate) * 1e8)) 
+    : 0
+  const btcDisplay = displayedRate && zmwAmount > 0 
+    ? (zmwAmount / displayedRate).toFixed(8) 
+    : '0.00000000'
 
-  const isMerchantConfigured = () => typeof window !== 'undefined' && !!parseInt(localStorage.getItem('zampos-merchant-id') || '0')
-  const getMerchantId        = () => parseInt(localStorage.getItem('zampos-merchant-id') || '0')
-  const getPayoutMode        = (): PayoutMode => (localStorage.getItem('zampos-payout-mode') as PayoutMode) || 'direct'
-  const getCustodialBalance  = () => parseInt(localStorage.getItem('zampos-custodial-balance') || '0')
+  // ── LocalStorage Helpers ────────────────────────────────────────────────────
+  const isMerchantConfigured = (): boolean => 
+    typeof window !== 'undefined' && !!parseInt(localStorage.getItem('zampos-merchant-id') || '0')
+  
+  const getMerchantId = (): number => 
+    parseInt(localStorage.getItem('zampos-merchant-id') || '0')
+  
+  const getPayoutMode = (): PayoutMode => 
+    (localStorage.getItem('zampos-payout-mode') as PayoutMode) || 'direct'
+  
+  const getCustodialBalance = (): number => 
+    parseInt(localStorage.getItem('zampos-custodial-balance') || '0')
 
+  // ── Data Fetching ───────────────────────────────────────────────────────────
   const fetchRate = useCallback(async (forceRefresh = false) => {
     try {
-      setRateLoading(true); setRateWarning(null)
+      setRateLoading(true)
+      setRateWarning(null)
       const r = await getRate(forceRefresh)
       setRate(r)
       if (r.warning) setRateWarning(r.warning)
-    } catch { setError(t.errorRate || 'Failed to fetch rate') }
-    finally { setRateLoading(false) }
+    } catch {
+      setError(t.errorRate || 'Failed to fetch rate')
+    } finally {
+      setRateLoading(false)
+    }
   }, [t])
 
   useEffect(() => {
@@ -89,9 +127,10 @@ export default function POSPage() {
       getMerchantSummary(mid),
       getMerchantTransactions(mid, 200),
     ]).then(([sum, txs]) => {
-      // getMerchantSummary returns { merchant_id, summary: {...} } — unwrap inner object
-      setSummary((sum as any)?.summary ?? sum)
-      setTransactions(txs)
+      // Unwrap summary: API returns { merchant_id, summary: {...} }
+      const summaryData = sum?.summary ?? sum ?? null
+      setSummary(summaryData)
+      setTransactions(txs || [])
     }).catch(() => {})
   }, [])
 
@@ -101,21 +140,30 @@ export default function POSPage() {
     return () => { if (rateRef.current) clearInterval(rateRef.current) }
   }, [fetchRate])
 
-  useEffect(() => { setScreen(isMerchantConfigured() ? 'pos' : 'onboarding') }, [])
+  useEffect(() => { 
+    setScreen(isMerchantConfigured() ? 'pos' : 'onboarding') 
+  }, [])
 
   useEffect(() => {
-    if (isValidLightningAddress(lightningAddress)) setWalletDomain(lightningAddress.split('@')[1])
-    else setWalletDomain(null)
+    if (isValidLightningAddress(lightningAddress)) {
+      setWalletDomain(lightningAddress.split('@')[1])
+    } else {
+      setWalletDomain(null)
+    }
   }, [lightningAddress])
 
-  // Payment polling
+  // ── Payment Polling ─────────────────────────────────────────────────────────
   useEffect(() => {
     if (screen !== 'invoice' || !invoice) return
     setPaymentPolling(true)
     const poll = setInterval(async () => {
       try {
         const s = await checkPaymentStatus(invoice.payment_hash)
-        if (s.paid) { clearInterval(poll); setPaymentPolling(false); _onPaymentSuccess() }
+        if (s.paid) { 
+          clearInterval(poll)
+          setPaymentPolling(false)
+          _onPaymentSuccess() 
+        }
       } catch {}
     }, 3000)
     return () => { clearInterval(poll); setPaymentPolling(false) }
@@ -130,7 +178,7 @@ export default function POSPage() {
   }
 
   // ── Validation ──────────────────────────────────────────────────────────────
-  const validateOnboarding = () => {
+  const validateOnboarding = (): boolean => {
     const errs: Record<string, string> = {}
     if (!shopName.trim() || shopName.trim().length < 2)
       errs.shopName = 'At least 2 characters'
@@ -140,41 +188,52 @@ export default function POSPage() {
       if (!lightningAddress.trim())
         errs.lightningAddress = 'Lightning Address required for Direct mode'
       else if (!isValidLightningAddress(lightningAddress))
-        errs.lightningAddress = 'Must be user@domain.com (e.g. you@walletofsatoshi.com)'
+        errs.lightningAddress = 'Must be user@domain.com'
     }
     setFieldErrors(errs)
     return Object.keys(errs).length === 0
   }
 
-  // ── Register ────────────────────────────────────────────────────────────────
+  // ── Handlers ────────────────────────────────────────────────────────────────
   const handleRegister = async () => {
     if (!validateOnboarding()) return
-    setError(''); setRegistering(true)
+    setError('')
+    setRegistering(true)
     try {
       const result: MerchantRegisterResponse = await registerMerchant({
-        shopName:         shopName.trim(),
-        location:         location.trim() || undefined,
-        phoneNumber:      phoneNumber.trim(),
+        shopName: shopName.trim(),
+        location: location.trim() || undefined,
+        phoneNumber: phoneNumber.trim(),
         payoutMode,
         lightningAddress: payoutMode === 'direct' ? lightningAddress.trim().toLowerCase() : undefined,
       })
-      localStorage.setItem('zampos-merchant-id',       result.merchant_id.toString())
-      localStorage.setItem('zampos-shop-name',         result.shop_name)
-      localStorage.setItem('zampos-payout-mode',       result.payout_mode)
-      localStorage.setItem('zampos-phone-number',      result.phone_number)
+      localStorage.setItem('zampos-merchant-id', result.merchant_id.toString())
+      localStorage.setItem('zampos-shop-name', result.shop_name)
+      localStorage.setItem('zampos-payout-mode', result.payout_mode)
+      localStorage.setItem('zampos-phone-number', result.phone_number)
       localStorage.setItem('zampos-lightning-address', result.lightning_address || '')
       localStorage.setItem('zampos-custodial-balance', '0')
-      setScreen('pos'); fetchRate(true)
+      setScreen('pos')
+      fetchRate(true)
     } catch (err: any) {
-      setError(err?.response?.data?.detail || 'Registration failed. Check your details and try again.')
-    } finally { setRegistering(false) }
+      setError(err?.response?.data?.detail || 'Registration failed')
+    } finally {
+      setRegistering(false)
+    }
   }
 
-  // ── Charge — offline-resilient ──────────────────────────────────────────────
   const handleCharge = async () => {
-    if (!zmwAmount || zmwAmount <= 0) { setError(t.errorAmount || 'Enter a valid amount'); return }
-    if (!isMerchantConfigured()) { setScreen('onboarding'); return }
-    setError(''); setLoading(true); setInvoiceQueued(false)
+    if (!zmwAmount || zmwAmount <= 0) { 
+      setError(t.errorAmount || 'Enter a valid amount')
+      return 
+    }
+    if (!isMerchantConfigured()) { 
+      setScreen('onboarding')
+      return 
+    }
+    setError('')
+    setLoading(true)
+    setInvoiceQueued(false)
     try {
       const { queued, result } = await safeCreateInvoice(
         createInvoice, zmwAmount, memo || 'ZamPOS Payment', getMerchantId()
@@ -189,10 +248,11 @@ export default function POSPage() {
       }
     } catch (err: any) {
       setError(err?.response?.data?.detail || t.errorInvoice || 'Failed to create invoice')
-    } finally { setLoading(false) }
+    } finally {
+      setLoading(false)
+    }
   }
 
-  // ── Manual confirm ──────────────────────────────────────────────────────────
   const handleManualConfirm = async () => {
     if (!invoice) return
     setConfirming(true)
@@ -200,41 +260,53 @@ export default function POSPage() {
       const r = await confirmPaid(invoice.payment_hash)
       if (r.success) _onPaymentSuccess()
       else setError('Could not confirm. Try again.')
-    } catch { setError('Confirmation failed. Try again.') }
-    finally { setConfirming(false) }
+    } catch { 
+      setError('Confirmation failed. Try again.') 
+    } finally {
+      setConfirming(false)
+    }
   }
 
-  // ── Withdraw ────────────────────────────────────────────────────────────────
   const handleWithdraw = async () => {
     if (!isValidLightningAddress(withdrawAddress)) {
-      setError('Enter a valid Lightning Address'); return
+      setError('Enter a valid Lightning Address')
+      return
     }
-    setError(''); setWithdrawing(true); setWithdrawResult(null)
+    setError('')
+    setWithdrawing(true)
+    setWithdrawResult(null)
     try {
       const r = await requestWithdrawal(getMerchantId(), withdrawAddress)
       localStorage.setItem('zampos-custodial-balance', '0')
       setWithdrawResult(r.message)
     } catch (err: any) {
       setError(err?.response?.data?.detail || 'Withdrawal request failed')
-    } finally { setWithdrawing(false) }
+    } finally {
+      setWithdrawing(false)
+    }
   }
 
   const handleNewSale = () => {
-    setZmwInput(''); setMemo(''); setInvoice(null); setError('')
-    setRateWarning(null); setInvoiceQueued(false)
+    setZmwInput('')
+    setMemo('')
+    setInvoice(null)
+    setError('')
+    setRateWarning(null)
+    setInvoiceQueued(false)
     setScreen('pos')
   }
 
-  const fmtNum    = (n: number) => n.toLocaleString(undefined, { maximumFractionDigits: 0 })
-  const savedAddr   = typeof window !== 'undefined' ? localStorage.getItem('zampos-lightning-address') : null
-  const savedMode   = typeof window !== 'undefined' ? getPayoutMode() : 'direct'
+  // ── Formatters ──────────────────────────────────────────────────────────────
+  const fmtNum = (n: number) => n.toLocaleString(undefined, { maximumFractionDigits: 0 })
+  const savedAddr = typeof window !== 'undefined' ? localStorage.getItem('zampos-lightning-address') : null
+  const savedMode = typeof window !== 'undefined' ? getPayoutMode() : 'direct'
   const custBalance = typeof window !== 'undefined' ? getCustodialBalance() : 0
 
   const inputClass = (err?: string) =>
     `w-full bg-surface border rounded-xl px-4 py-3 text-text font-body outline-none transition-colors placeholder:text-muted
      ${err ? 'border-red-400' : 'border-border focus:border-bitcoin'}`
 
-  // ── ONBOARDING ──────────────────────────────────────────────────────────────
+  // ── ONBOARDING SCREEN ───────────────────────────────────────────────────────
   if (screen === 'onboarding') return (
     <main className="min-h-screen bg-surface flex flex-col">
       <header className="border-b border-border px-6 py-4 flex items-center justify-between">
@@ -247,7 +319,6 @@ export default function POSPage() {
 
       <div className="flex-1 flex flex-col items-center justify-center px-6 py-8 animate-fade-in">
         <div className="w-full max-w-sm space-y-5">
-
           <div className="text-center space-y-2">
             <div className="inline-flex items-center justify-center w-16 h-16 rounded-2xl bg-bitcoin/10 mb-2">
               <Store size={28} className="text-bitcoin" />
@@ -257,7 +328,7 @@ export default function POSPage() {
           </div>
 
           <div className="bg-panel border border-border rounded-2xl p-5 space-y-4">
-
+            {/* Shop Name */}
             <div className="space-y-1">
               <label className="text-text-dim text-xs font-mono uppercase tracking-widest flex items-center gap-1">
                 <Store size={11} /> Shop Name <span className="text-bitcoin ml-0.5">*</span>
@@ -269,6 +340,7 @@ export default function POSPage() {
               {fieldErrors.shopName && <p className="text-red-400 text-xs font-mono">{fieldErrors.shopName}</p>}
             </div>
 
+            {/* Location */}
             <div className="space-y-1">
               <label className="text-text-dim text-xs font-mono uppercase tracking-widest">
                 Location <span className="text-muted">(optional)</span>
@@ -279,6 +351,7 @@ export default function POSPage() {
                 className={inputClass()} />
             </div>
 
+            {/* Phone */}
             <div className="space-y-1">
               <label className="text-text-dim text-xs font-mono uppercase tracking-widest flex items-center gap-1">
                 <Phone size={11} /> Phone Number <span className="text-bitcoin ml-0.5">*</span>
@@ -292,6 +365,7 @@ export default function POSPage() {
                 : <p className="text-muted text-xs font-mono">📱 Get an SMS every time you receive a payment</p>}
             </div>
 
+            {/* Payout Mode */}
             <div className="space-y-2">
               <label className="text-text-dim text-xs font-mono uppercase tracking-widest">How do you want to receive payments?</label>
               <div className="grid grid-cols-2 gap-2">
@@ -310,6 +384,7 @@ export default function POSPage() {
               </div>
             </div>
 
+            {/* Lightning Address (direct only) */}
             {payoutMode === 'direct' && (
               <div className="space-y-1">
                 <label className="text-text-dim text-xs font-mono uppercase tracking-widest flex items-center gap-1">
@@ -372,7 +447,6 @@ export default function POSPage() {
 
       <div className="flex-1 flex flex-col items-center justify-center px-6 py-8 animate-fade-in">
         <div className="w-full max-w-sm space-y-5">
-
           <div className="bg-panel border border-border rounded-2xl p-5 text-center space-y-1">
             <p className="text-text-dim text-xs font-mono uppercase tracking-widest">Your Balance</p>
             <p className="font-display font-bold text-4xl text-bitcoin">{custBalance.toLocaleString()}</p>
@@ -418,7 +492,7 @@ export default function POSPage() {
     </main>
   )
 
-  // ── POS + INVOICE + SUCCESS ─────────────────────────────────────────────────
+  // ── POS / INVOICE / SUCCESS SCREENS ─────────────────────────────────────────
   return (
     <main className="min-h-screen bg-surface flex flex-col">
       <header className="border-b border-border px-6 py-4 flex items-center justify-between">
@@ -457,11 +531,12 @@ export default function POSPage() {
         </div>
       )}
 
-      {/* ── POS ── */}
+      {/* ── POS SCREEN ── */}
       {screen === 'pos' && (
         <div className="flex-1 flex flex-col items-center justify-center px-6 py-8 animate-fade-in">
           <div className="w-full max-w-sm space-y-5">
 
+            {/* Custodial balance banner */}
             {savedMode === 'custodial' && custBalance > 0 && (
               <button onClick={() => setScreen('withdraw')}
                 className="w-full bg-bitcoin/10 border border-bitcoin/30 rounded-2xl p-4
@@ -474,6 +549,7 @@ export default function POSPage() {
               </button>
             )}
 
+            {/* Offline queued confirmation */}
             {invoiceQueued && (
               <div className="bg-amber-400/10 border border-amber-400/30 rounded-2xl p-4 flex items-start gap-3">
                 <Clock size={16} className="text-amber-400 shrink-0 mt-0.5" />
@@ -487,6 +563,7 @@ export default function POSPage() {
               </div>
             )}
 
+            {/* Amount input */}
             <div className="bg-panel border border-border rounded-2xl p-6 space-y-2">
               <label className="text-text-dim text-xs font-mono uppercase tracking-widest">{t.amountLabel}</label>
               <div className="flex items-center gap-2">
@@ -505,6 +582,7 @@ export default function POSPage() {
               </div>
             </div>
 
+            {/* Memo */}
             <div className="bg-panel border border-border rounded-2xl p-4 space-y-1">
               <label className="text-text-dim text-xs font-mono uppercase tracking-widest">{t.memoLabel}</label>
               <input type="text" value={memo} maxLength={80}
@@ -515,6 +593,7 @@ export default function POSPage() {
 
             {error && <p className="text-red-400 text-sm font-mono text-center bg-red-400/10 rounded-lg p-2">{error}</p>}
 
+            {/* Charge button */}
             <button onClick={handleCharge}
               disabled={loading || !zmwAmount || zmwAmount <= 0 || rateLoading}
               className="w-full bg-bitcoin hover:bg-bitcoin-dark disabled:opacity-40 disabled:cursor-not-allowed
@@ -532,10 +611,10 @@ export default function POSPage() {
               <p className="text-center text-muted text-xs font-mono">🏦 Sweep mode — sats accumulate until you withdraw</p>
             )}
 
-            {/* Enhanced daily summary */}
-            <EnhancedSummaryCard summary={summary} transactions={transactions} />
+            {/* Summary Card - Always render, component handles empty state */}
+            <SummaryCard summary={summary ?? undefined} transactions={transactions} />
 
-            {/* Static LNURL QR */}
+            {/* Static LNURL QR Card */}
             {isMerchantConfigured() && (
               <StaticQRCard
                 merchantId={getMerchantId()}
@@ -549,7 +628,7 @@ export default function POSPage() {
         </div>
       )}
 
-      {/* ── Invoice ── */}
+      {/* ── INVOICE SCREEN ── */}
       {screen === 'invoice' && invoice && (
         <div className="flex-1 flex flex-col items-center justify-center px-6 py-8 animate-slide-up">
           <div className="w-full max-w-sm space-y-5">
@@ -610,7 +689,7 @@ export default function POSPage() {
         </div>
       )}
 
-      {/* ── Success ── */}
+      {/* ── SUCCESS SCREEN ── */}
       {screen === 'success' && invoice && (
         <div className="flex-1 flex flex-col items-center justify-center px-6 py-12 animate-fade-in">
           <div className="w-full max-w-sm space-y-6 text-center">
