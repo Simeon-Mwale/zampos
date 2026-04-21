@@ -10,6 +10,10 @@ from services.rate_service import fetch_live_rates, format_btc_display, get_cach
 from services.lnurl_pay import fetch_invoice_from_lightning_address, validate_lightning_address, extract_payment_hash
 from services.spread_engine import calculate_spread, apply_spread_to_rate, is_invoiceable
 from services.sms_service import send_payment_confirmation
+# NEW: static LNURL service
+from services.lnurl_static import (
+    build_lnurlp_response, get_lnurl_encoded, get_qr_value, get_lnurlp_url
+)
 from database import (
     save_transaction, mark_paid, mark_sms_sent,
     get_merchant_by_id, create_merchant, update_merchant,
@@ -174,9 +178,7 @@ async def register_merchant(req: MerchantRegisterRequest):
         }
 
     try:
-        # ✅ FIX: prevent NULL constraint crash
         lightning_address = req.lightning_address or ""
-
         m = await create_merchant(
             shop_name=req.shop_name,
             phone_number=req.phone_number,
@@ -184,12 +186,10 @@ async def register_merchant(req: MerchantRegisterRequest):
             location=req.location,
             lightning_address=lightning_address
         )
-
         return {**m, **wallet_info}
 
     except ValueError as e:
         raise HTTPException(400, str(e))
-
     except Exception as e:
         logger.error(f"❌ register: {e}")
         raise HTTPException(400, "Registration failed")
@@ -233,7 +233,6 @@ async def get_merchant_summary(merchant_id: int):
 
 @router.post("/merchant/{merchant_id}/withdraw")
 async def request_withdrawal(merchant_id: int, req: WithdrawRequest):
-    """Custodial merchant: End Day & Withdraw. Logs request, operator sends from WoS."""
     m = await get_merchant_by_id(merchant_id)
     if not m: raise HTTPException(404, "Merchant not found")
     if m["payout_mode"] != "custodial": raise HTTPException(400, "Only available for custodial merchants")
@@ -268,7 +267,6 @@ async def get_withdrawals(merchant_id: int, limit: int = 20):
 
 @router.post("/confirm-paid")
 async def confirm_paid(req: ConfirmPaidRequest, background_tasks: BackgroundTasks):
-    """Merchant taps 'I Received It'. Marks paid, credits custodial balance, sends SMS."""
     tx = await get_transaction_by_hash(req.payment_hash)
     if not tx: raise HTTPException(404, "Transaction not found")
     if tx["status"] == "paid": return {"success": True, "already_paid": True, "message": "Already confirmed"}
@@ -295,10 +293,6 @@ async def confirm_paid(req: ConfirmPaidRequest, background_tasks: BackgroundTask
 
 @router.post("/create")
 async def new_invoice(body: CreateInvoiceRequest, background_tasks: BackgroundTasks):
-    """
-    DIRECT mode:    Invoice from merchant's Lightning Address. Customer pays merchant directly.
-    CUSTODIAL mode: Invoice from operator's WoS. Sats accumulate. Merchant withdraws later.
-    """
     if body.amount_zmw < MIN_ZMW: raise HTTPException(400, f"Minimum amount is K{MIN_ZMW}")
     m = await get_merchant_by_id(body.merchant_id)
     if not m: raise HTTPException(404, "Merchant not found")
@@ -428,6 +422,157 @@ async def payment_webhook(request: Request, background_tasks: BackgroundTasks):
         return {"status": "received", "payment_hash": payment_hash}
     except Exception as e:
         logger.error(f"❌ Webhook: {e}", exc_info=True); return {"status": "error"}
+
+
+# ── NEW: Static LNURL-pay endpoints ───────────────────────────────────────────
+#
+# These two endpoints together implement the LNURL-pay spec:
+#   Step 1: GET /merchant/{id}/lnurl          → wallet fetches metadata
+#   Step 2: GET /merchant/{id}/lnurl/callback → wallet fetches bolt11 invoice
+#
+# The QR code encodes: lightning:LNURL1... (bech32 of the step-1 URL)
+# Vendors print this once. Customers scan it and enter any ZMW amount.
+# ─────────────────────────────────────────────────────────────────────────────
+
+@router.get("/merchant/{merchant_id}/lnurl")
+async def lnurl_pay_metadata(merchant_id: int):
+    """
+    LNURL-pay Step 1: wallet fetches this to learn min/max amounts and description.
+    Returns spec-compliant payRequest metadata.
+    Works for BOTH direct and custodial merchants.
+    """
+    m = await get_merchant_by_id(merchant_id)
+    if not m: raise HTTPException(404, "Merchant not found")
+
+    return build_lnurlp_response(
+        merchant_id=merchant_id,
+        shop_name=m["shop_name"],
+        location=m.get("location"),
+    )
+
+
+@router.get("/merchant/{merchant_id}/lnurl/callback")
+async def lnurl_pay_callback(
+    merchant_id: int,
+    amount: int,                          # msats — sent by wallet
+    comment: Optional[str] = Query(None),
+    background_tasks: BackgroundTasks = None,
+):
+    """
+    LNURL-pay Step 2: wallet sends amount in msats, we return a bolt11 invoice.
+
+    Direct mode:    Fetch invoice from merchant's own Lightning Address.
+                    ZamPOS is just a router — zero custody.
+    Custodial mode: Fetch invoice from operator wallet, credit merchant on payment.
+    """
+    m = await get_merchant_by_id(merchant_id)
+    if not m:
+        return {"status": "ERROR", "reason": "Merchant not found"}
+
+    # Validate amount
+    from services.lnurl_static import GLOBAL_MIN_SATS, GLOBAL_MAX_SATS
+    min_msats = GLOBAL_MIN_SATS * 1000
+    max_msats = GLOBAL_MAX_SATS * 1000
+
+    if amount < min_msats:
+        return {"status": "ERROR", "reason": f"Amount too low. Minimum is {GLOBAL_MIN_SATS} sats"}
+    if amount > max_msats:
+        return {"status": "ERROR", "reason": f"Amount too high. Maximum is {GLOBAL_MAX_SATS} sats"}
+
+    amount_sats = amount // 1000
+
+    # Convert sats → ZMW using live rate
+    try:
+        zmw_per_btc, _ = await fetch_live_rates(force_refresh=False)
+        real_rate = float(zmw_per_btc)
+        amount_zmw = round((amount_sats / 1e8) * real_rate, 2)
+    except Exception:
+        amount_zmw = 0.0  # fallback — still works, just no ZMW record
+
+    # Apply spread to get gross/merchant/operator split
+    try:
+        gross_sats, merchant_sats, operator_sats = calculate_spread(amount_zmw, real_rate)
+        # For LNURL static QR, amount_sats IS gross_sats (customer chose the sats amount)
+        # Override gross to match what was requested
+        gross_sats = amount_sats
+    except Exception:
+        gross_sats = amount_sats
+        merchant_sats = amount_sats
+        operator_sats = 0
+
+    # Choose invoice source
+    payout_mode     = m["payout_mode"]
+    invoice_address = m["lightning_address"] if payout_mode == "direct" else OPERATOR_LIGHTNING_ADDRESS
+
+    memo = comment or f"ZamPOS · {m['shop_name']}"
+
+    try:
+        bolt11 = await fetch_invoice_from_lightning_address(
+            invoice_address, gross_sats, comment=memo
+        )
+        payment_hash = extract_payment_hash(bolt11)
+        cache_meta   = get_cache_metadata()
+
+        # Save to DB — same as regular invoice
+        await save_transaction(
+            payment_hash=payment_hash,
+            merchant_id=merchant_id,
+            amount_zmw=amount_zmw,
+            gross_sats=gross_sats,
+            merchant_sats=merchant_sats,
+            operator_sats=operator_sats,
+            memo=memo,
+            payout_mode=payout_mode,
+            rate_snapshot={
+                "zmw_per_btc": real_rate,
+                "displayed_zmw_per_btc": apply_spread_to_rate(real_rate),
+                "sats_per_zmw": float(_) if _ else 0,
+                "source": "lnurl_static",
+                "timestamp": cache_meta["last_updated"],
+            }
+        )
+
+        # Start background polling (same as regular invoice)
+        if background_tasks:
+            background_tasks.add_task(
+                _poll_payment,
+                payment_hash=payment_hash,
+                merchant_id=merchant_id,
+                gross_sats=gross_sats,
+                payout_mode=payout_mode,
+                merchant_phone=m["phone_number"],
+                shop_name=m["shop_name"],
+                amount_zmw=amount_zmw,
+                lightning_address=invoice_address,
+            )
+
+        logger.info(f"⚡ LNURL invoice | merchant={merchant_id} | {gross_sats} sats | {payout_mode}")
+
+        return {"pr": bolt11, "routes": []}
+
+    except Exception as e:
+        logger.error(f"❌ LNURL callback: {e}", exc_info=True)
+        return {"status": "ERROR", "reason": "Could not generate invoice. Try again."}
+
+
+@router.get("/merchant/{merchant_id}/lnurl/info")
+async def lnurl_info(merchant_id: int):
+    """
+    Returns the LNURL strings and QR value for the frontend to display.
+    Used by StaticQRCard component.
+    """
+    m = await get_merchant_by_id(merchant_id)
+    if not m: raise HTTPException(404, "Merchant not found")
+
+    return {
+        "merchant_id":   merchant_id,
+        "shop_name":     m["shop_name"],
+        "location":      m.get("location"),
+        "payout_mode":   m["payout_mode"],
+        "lnurl_url":     get_lnurlp_url(merchant_id),
+        "lnurl_encoded": get_lnurl_encoded(merchant_id),
+        "qr_value":      get_qr_value(merchant_id),
+    }
 
 
 # ── Background ─────────────────────────────────────────────────────────────────

@@ -17,4 +17,5 @@ typing_extensions==4.15.0
 uvicorn==0.44.0
 
 # Optional: better BOLT11 payment hash extraction
-# bolt11==2.0.1
+bolt11==2.0.1
+bech32>=1.2.0

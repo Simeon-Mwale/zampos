@@ -1,11 +1,12 @@
-// app/page.tsx — ZamPOS v2.2
+// app/page.tsx — ZamPOS v2.1: Direct + Custodial payout modes
 'use client'
 import SummaryCard, { EnhancedSummaryCard } from '@/components/SummaryCard'
 import StaticQRCard from '@/components/StaticQRCard'
 import { getMerchantSummary, getMerchantTransactions } from '@/lib/api'
 import { useState, useEffect, useCallback, useRef } from 'react'
-import { Zap, RefreshCw, ChevronRight, X, CheckCircle, Clock,
+import { Zap, RefreshCw, ChevronRight, X, CheckCircle, Clock, LayoutDashboard,
          Settings, Store, AlertCircle, Phone, Wallet, CheckCircle2, ArrowDownToLine } from 'lucide-react'
+import Link from 'next/link'
 import { QRCodeSVG } from 'qrcode.react'
 import { getRate, createInvoice, checkPaymentStatus, confirmPaid, registerMerchant, requestWithdrawal } from '@/lib/api'
 import type { InvoiceResponse, RateResponse, MerchantRegisterResponse, PayoutMode } from '@/lib/api'
@@ -36,7 +37,7 @@ export default function POSPage() {
   const [rate, setRate]                     = useState<RateResponse | null>(null)
   const [rateLoading, setRateLoading]       = useState(true)
   const [rateWarning, setRateWarning]       = useState<string | null>(null)
-  const [screen, setScreen]                 = useState<Screen>('onboarding')
+  const [screen, setScreen]                = useState<Screen>('onboarding')
   const [invoice, setInvoice]               = useState<InvoiceResponse | null>(null)
   const [loading, setLoading]               = useState(false)
   const [error, setError]                   = useState('')
@@ -55,9 +56,9 @@ export default function POSPage() {
   const [walletDomain, setWalletDomain]         = useState<string | null>(null)
 
   // Withdraw
-  const [withdrawAddress, setWithdrawAddress] = useState('')
-  const [withdrawing, setWithdrawing]         = useState(false)
-  const [withdrawResult, setWithdrawResult]   = useState<string | null>(null)
+  const [withdrawAddress, setWithdrawAddress]   = useState('')
+  const [withdrawing, setWithdrawing]           = useState(false)
+  const [withdrawResult, setWithdrawResult]     = useState<string | null>(null)
 
   const rateRef = useRef<NodeJS.Timeout | null>(null)
 
@@ -68,9 +69,9 @@ export default function POSPage() {
   const btcDisplay    = displayedRate && zmwAmount > 0 ? (zmwAmount / displayedRate).toFixed(8) : '0.00000000'
 
   const isMerchantConfigured = () => typeof window !== 'undefined' && !!parseInt(localStorage.getItem('zampos-merchant-id') || '0')
-  const getMerchantId        = () => parseInt(localStorage.getItem('zampos-merchant-id') || '0')
-  const getPayoutMode        = (): PayoutMode => (localStorage.getItem('zampos-payout-mode') as PayoutMode) || 'direct'
-  const getCustodialBalance  = () => parseInt(localStorage.getItem('zampos-custodial-balance') || '0')
+  const getMerchantId       = () => parseInt(localStorage.getItem('zampos-merchant-id') || '0')
+  const getPayoutMode       = (): PayoutMode => (localStorage.getItem('zampos-payout-mode') as PayoutMode) || 'direct'
+  const getCustodialBalance = () => parseInt(localStorage.getItem('zampos-custodial-balance') || '0')
 
   const fetchRate = useCallback(async (forceRefresh = false) => {
     try {
@@ -89,8 +90,8 @@ export default function POSPage() {
       getMerchantSummary(mid),
       getMerchantTransactions(mid, 200),
     ]).then(([sum, txs]) => {
-      // getMerchantSummary returns { merchant_id, summary: {...} } — unwrap inner object
-      setSummary((sum as any)?.summary ?? sum)
+      // getMerchantSummary returns { merchant_id, summary: {...} } — unwrap the inner object
+      setSummary(sum?.summary ?? sum)
       setTransactions(txs)
     }).catch(() => {})
   }, [])
@@ -129,7 +130,7 @@ export default function POSPage() {
     setScreen('success')
   }
 
-  // ── Validation ──────────────────────────────────────────────────────────────
+  // ── Validation ───────────────────────────────────────────────────────────────
   const validateOnboarding = () => {
     const errs: Record<string, string> = {}
     if (!shopName.trim() || shopName.trim().length < 2)
@@ -146,31 +147,31 @@ export default function POSPage() {
     return Object.keys(errs).length === 0
   }
 
-  // ── Register ────────────────────────────────────────────────────────────────
+  // ── Register ─────────────────────────────────────────────────────────────────
   const handleRegister = async () => {
     if (!validateOnboarding()) return
     setError(''); setRegistering(true)
     try {
       const result: MerchantRegisterResponse = await registerMerchant({
-        shopName:         shopName.trim(),
-        location:         location.trim() || undefined,
-        phoneNumber:      phoneNumber.trim(),
+        shopName: shopName.trim(),
+        location: location.trim() || undefined,
+        phoneNumber: phoneNumber.trim(),
         payoutMode,
         lightningAddress: payoutMode === 'direct' ? lightningAddress.trim().toLowerCase() : undefined,
       })
-      localStorage.setItem('zampos-merchant-id',       result.merchant_id.toString())
-      localStorage.setItem('zampos-shop-name',         result.shop_name)
-      localStorage.setItem('zampos-payout-mode',       result.payout_mode)
-      localStorage.setItem('zampos-phone-number',      result.phone_number)
-      localStorage.setItem('zampos-lightning-address', result.lightning_address || '')
-      localStorage.setItem('zampos-custodial-balance', '0')
+      localStorage.setItem('zampos-merchant-id',        result.merchant_id.toString())
+      localStorage.setItem('zampos-shop-name',          result.shop_name)
+      localStorage.setItem('zampos-payout-mode',        result.payout_mode)
+      localStorage.setItem('zampos-phone-number',       result.phone_number)
+      localStorage.setItem('zampos-lightning-address',  result.lightning_address || '')
+      localStorage.setItem('zampos-custodial-balance',  '0')
       setScreen('pos'); fetchRate(true)
     } catch (err: any) {
       setError(err?.response?.data?.detail || 'Registration failed. Check your details and try again.')
     } finally { setRegistering(false) }
   }
 
-  // ── Charge — offline-resilient ──────────────────────────────────────────────
+  // ── Charge — offline-resilient ───────────────────────────────────────────────
   const handleCharge = async () => {
     if (!zmwAmount || zmwAmount <= 0) { setError(t.errorAmount || 'Enter a valid amount'); return }
     if (!isMerchantConfigured()) { setScreen('onboarding'); return }
@@ -192,7 +193,7 @@ export default function POSPage() {
     } finally { setLoading(false) }
   }
 
-  // ── Manual confirm ──────────────────────────────────────────────────────────
+  // ── Manual confirm ───────────────────────────────────────────────────────────
   const handleManualConfirm = async () => {
     if (!invoice) return
     setConfirming(true)
@@ -204,7 +205,7 @@ export default function POSPage() {
     finally { setConfirming(false) }
   }
 
-  // ── Withdraw ────────────────────────────────────────────────────────────────
+  // ── Withdraw ─────────────────────────────────────────────────────────────────
   const handleWithdraw = async () => {
     if (!isValidLightningAddress(withdrawAddress)) {
       setError('Enter a valid Lightning Address'); return
@@ -225,7 +226,7 @@ export default function POSPage() {
     setScreen('pos')
   }
 
-  const fmtNum    = (n: number) => n.toLocaleString(undefined, { maximumFractionDigits: 0 })
+  const fmtNum = (n: number) => n.toLocaleString(undefined, { maximumFractionDigits: 0 })
   const savedAddr   = typeof window !== 'undefined' ? localStorage.getItem('zampos-lightning-address') : null
   const savedMode   = typeof window !== 'undefined' ? getPayoutMode() : 'direct'
   const custBalance = typeof window !== 'undefined' ? getCustodialBalance() : 0
@@ -234,7 +235,7 @@ export default function POSPage() {
     `w-full bg-surface border rounded-xl px-4 py-3 text-text font-body outline-none transition-colors placeholder:text-muted
      ${err ? 'border-red-400' : 'border-border focus:border-bitcoin'}`
 
-  // ── ONBOARDING ──────────────────────────────────────────────────────────────
+  // ── ONBOARDING ────────────────────────────────────────────────────────────────
   if (screen === 'onboarding') return (
     <main className="min-h-screen bg-surface flex flex-col">
       <header className="border-b border-border px-6 py-4 flex items-center justify-between">
@@ -258,6 +259,7 @@ export default function POSPage() {
 
           <div className="bg-panel border border-border rounded-2xl p-5 space-y-4">
 
+            {/* Shop Name */}
             <div className="space-y-1">
               <label className="text-text-dim text-xs font-mono uppercase tracking-widest flex items-center gap-1">
                 <Store size={11} /> Shop Name <span className="text-bitcoin ml-0.5">*</span>
@@ -269,6 +271,7 @@ export default function POSPage() {
               {fieldErrors.shopName && <p className="text-red-400 text-xs font-mono">{fieldErrors.shopName}</p>}
             </div>
 
+            {/* Location */}
             <div className="space-y-1">
               <label className="text-text-dim text-xs font-mono uppercase tracking-widest">
                 Location <span className="text-muted">(optional)</span>
@@ -279,6 +282,7 @@ export default function POSPage() {
                 className={inputClass()} />
             </div>
 
+            {/* Phone */}
             <div className="space-y-1">
               <label className="text-text-dim text-xs font-mono uppercase tracking-widest flex items-center gap-1">
                 <Phone size={11} /> Phone Number <span className="text-bitcoin ml-0.5">*</span>
@@ -292,6 +296,7 @@ export default function POSPage() {
                 : <p className="text-muted text-xs font-mono">📱 Get an SMS every time you receive a payment</p>}
             </div>
 
+            {/* Payout Mode */}
             <div className="space-y-2">
               <label className="text-text-dim text-xs font-mono uppercase tracking-widest">How do you want to receive payments?</label>
               <div className="grid grid-cols-2 gap-2">
@@ -310,6 +315,7 @@ export default function POSPage() {
               </div>
             </div>
 
+            {/* Lightning Address (direct only) */}
             {payoutMode === 'direct' && (
               <div className="space-y-1">
                 <label className="text-text-dim text-xs font-mono uppercase tracking-widest flex items-center gap-1">
@@ -361,7 +367,7 @@ export default function POSPage() {
     </main>
   )
 
-  // ── WITHDRAW SCREEN ─────────────────────────────────────────────────────────
+  // ── WITHDRAW SCREEN ───────────────────────────────────────────────────────────
   if (screen === 'withdraw') return (
     <main className="min-h-screen bg-surface flex flex-col">
       <header className="border-b border-border px-6 py-4 flex items-center justify-between">
@@ -418,7 +424,7 @@ export default function POSPage() {
     </main>
   )
 
-  // ── POS + INVOICE + SUCCESS ─────────────────────────────────────────────────
+  // ── POS + INVOICE + SUCCESS ───────────────────────────────────────────────────
   return (
     <main className="min-h-screen bg-surface flex flex-col">
       <header className="border-b border-border px-6 py-4 flex items-center justify-between">
@@ -462,6 +468,7 @@ export default function POSPage() {
         <div className="flex-1 flex flex-col items-center justify-center px-6 py-8 animate-fade-in">
           <div className="w-full max-w-sm space-y-5">
 
+            {/* Custodial balance banner */}
             {savedMode === 'custodial' && custBalance > 0 && (
               <button onClick={() => setScreen('withdraw')}
                 className="w-full bg-bitcoin/10 border border-bitcoin/30 rounded-2xl p-4
@@ -474,6 +481,7 @@ export default function POSPage() {
               </button>
             )}
 
+            {/* Offline queued confirmation */}
             {invoiceQueued && (
               <div className="bg-amber-400/10 border border-amber-400/30 rounded-2xl p-4 flex items-start gap-3">
                 <Clock size={16} className="text-amber-400 shrink-0 mt-0.5" />
@@ -487,6 +495,7 @@ export default function POSPage() {
               </div>
             )}
 
+            {/* Amount input */}
             <div className="bg-panel border border-border rounded-2xl p-6 space-y-2">
               <label className="text-text-dim text-xs font-mono uppercase tracking-widest">{t.amountLabel}</label>
               <div className="flex items-center gap-2">
@@ -505,6 +514,7 @@ export default function POSPage() {
               </div>
             </div>
 
+            {/* Memo */}
             <div className="bg-panel border border-border rounded-2xl p-4 space-y-1">
               <label className="text-text-dim text-xs font-mono uppercase tracking-widest">{t.memoLabel}</label>
               <input type="text" value={memo} maxLength={80}
@@ -515,6 +525,7 @@ export default function POSPage() {
 
             {error && <p className="text-red-400 text-sm font-mono text-center bg-red-400/10 rounded-lg p-2">{error}</p>}
 
+            {/* Charge button */}
             <button onClick={handleCharge}
               disabled={loading || !zmwAmount || zmwAmount <= 0 || rateLoading}
               className="w-full bg-bitcoin hover:bg-bitcoin-dark disabled:opacity-40 disabled:cursor-not-allowed
@@ -532,10 +543,12 @@ export default function POSPage() {
               <p className="text-center text-muted text-xs font-mono">🏦 Sweep mode — sats accumulate until you withdraw</p>
             )}
 
-            {/* Enhanced daily summary */}
-            <EnhancedSummaryCard summary={summary} transactions={transactions} />
+            {/* Daily summary */}
+            {(summary || transactions.length > 0) && (
+              <EnhancedSummaryCard summary={summary} transactions={transactions} />
+            )}
 
-            {/* Static LNURL QR */}
+            {/* Static LNURL QR — collapsed by default */}
             {isMerchantConfigured() && (
               <StaticQRCard
                 merchantId={getMerchantId()}

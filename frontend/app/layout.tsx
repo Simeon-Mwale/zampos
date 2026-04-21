@@ -1,6 +1,7 @@
 import type { Metadata, Viewport } from 'next'
 import './globals.css'
 import { LanguageProvider } from '@/context/LanguageContext'
+import OfflineProvider from '@/components/OfflineProvider'
 
 export const metadata: Metadata = {
   title: 'ZamPOS ⚡',
@@ -30,7 +31,10 @@ export default function RootLayout({ children }: { children: React.ReactNode }) 
       </head>
       <body>
         <LanguageProvider>
-          {children}
+          {/* NEW: OfflineProvider sits at root — shows banner + flushes queue on reconnect */}
+          <OfflineProvider>
+            {children}
+          </OfflineProvider>
         </LanguageProvider>
       </body>
     </html>
