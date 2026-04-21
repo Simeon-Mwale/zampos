@@ -1,77 +1,13 @@
 'use client'
 
-// ── hooks/useOfflineQueue.ts ───────────────────────────────────────────────────
-// Registers the online flush listener and exposes offline state + queue length.
-//
-// Usage in layout.tsx:
-//   import { useOfflineQueue } from '@/hooks/useOfflineQueue'
-//   const { isOffline, queueLength } = useOfflineQueue()
-//
-// Then show the banner conditionally:
-//   {isOffline && <OfflineBanner queueLength={queueLength} />}
-// ─────────────────────────────────────────────────────────────────────────────
-
-import { useState, useEffect } from 'react'
-import { createInvoice } from '@/lib/api'
-import { registerOnlineFlush, getQueueLength } from '@/lib/offlineQueue'
-
-export const useOfflineQueue = () => {
-  const [isOffline,    setIsOffline]    = useState(false)
-  const [queueLength,  setQueueLength]  = useState(0)
-  const [flushing,     setFlushing]     = useState(false)
-
-  useEffect(() => {
-    // Initial state
-    setIsOffline(!navigator.onLine)
-    setQueueLength(getQueueLength())
-
-    const onOffline = () => {
-      setIsOffline(true)
-      setQueueLength(getQueueLength())
-    }
-
-    const onOnline = async () => {
-      setIsOffline(false)
-      const len = getQueueLength()
-      if (len > 0) {
-        setFlushing(true)
-        try {
-          const { processQueue } = await import('@/lib/offlineQueue')
-          await processQueue(createInvoice)
-        } finally {
-          setQueueLength(getQueueLength())
-          setFlushing(false)
-        }
-      }
-    }
-
-    window.addEventListener('offline', onOffline)
-    window.addEventListener('online',  onOnline)
-
-    // Also register the standalone flush (belt + suspenders)
-    const cleanup = registerOnlineFlush(createInvoice)
-
-    return () => {
-      window.removeEventListener('offline', onOffline)
-      window.removeEventListener('online',  onOnline)
-      cleanup?.()
-    }
-  }, [])
-
-  return { isOffline, queueLength, flushing }
-}
-
-
-// ── OfflineBanner component — paste into layout.tsx or a shared component ─────
-
 import { WifiOff, Loader2 } from 'lucide-react'
 
-interface OfflineBannerProps {
+interface Props {
   queueLength: number
   flushing?: boolean
 }
 
-export function OfflineBanner({ queueLength, flushing }: OfflineBannerProps) {
+export default function OfflineBanner({ queueLength, flushing }: Props) {
   if (flushing) {
     return (
       <div className="w-full bg-bitcoin/10 border-b border-bitcoin/30 px-4 py-2 flex items-center justify-center gap-2">
