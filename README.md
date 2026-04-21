@@ -224,5 +224,5 @@ MIT — free to use, modify, and deploy.
 ---
 
 *Built in Lusaka, Zambia. For the informal market. For Bitcoin.* 🇿🇲⚡
-
-> "If you want to go fast, go alone. If you want to go far, go together." — African Proverb
+slam
+> "If you want to go fast, go alone. If you want to go far, go together." — African Proverb"# trigger deploy" 
