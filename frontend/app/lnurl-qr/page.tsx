@@ -1,54 +1,54 @@
-'use client'
+'use client';
 
-// app/lnurl-qr/LNURLQRPageInner.tsx
+import { Suspense } from 'react';
+import { useState, useEffect } from 'react';
+import { QRCodeSVG } from 'qrcode.react';
+import { useSearchParams } from 'next/navigation';
+import { Zap, Printer, ArrowLeft, RefreshCw } from 'lucide-react';
+import Link from 'next/link';
 
-import { useState, useEffect } from 'react'
-import { QRCodeSVG } from 'qrcode.react'
-import { useSearchParams } from 'next/navigation'
-import { Zap, Printer, ArrowLeft, RefreshCw } from 'lucide-react'
-import Link from 'next/link'
-
-const API = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:8000'
+const API = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:8000';
 
 interface LNURLInfo {
-  merchant_id: number
-  shop_name: string
-  location: string | null
-  payout_mode: string
-  lnurl_url: string
-  lnurl_encoded: string
-  qr_value: string
+  merchant_id: number;
+  shop_name: string;
+  location: string | null;
+  payout_mode: string;
+  lnurl_url: string;
+  lnurl_encoded: string;
+  qr_value: string;
 }
 
-export default function LNURLQRPageInner() {
-  const params = useSearchParams()
-  const merchantId = params.get('id')
+// Component that uses useSearchParams (must be wrapped in Suspense)
+function LNURLQRPageInner() {
+  const params = useSearchParams();
+  const merchantId = params.get('id');
 
-  const [info, setInfo] = useState<LNURLInfo | null>(null)
-  const [loading, setLoading] = useState(true)
-  const [error, setError] = useState<string | null>(null)
+  const [info, setInfo] = useState<LNURLInfo | null>(null);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState<string | null>(null);
 
   useEffect(() => {
     if (!merchantId) {
-      setError('No merchant ID')
-      setLoading(false)
-      return
+      setError('No merchant ID');
+      setLoading(false);
+      return;
     }
 
     fetch(`${API}/merchant/${merchantId}/lnurl/info`)
       .then(r => {
-        if (!r.ok) throw new Error('Merchant not found')
-        return r.json()
+        if (!r.ok) throw new Error('Merchant not found');
+        return r.json();
       })
       .then(data => {
-        setInfo(data)
-        setLoading(false)
+        setInfo(data);
+        setLoading(false);
       })
       .catch(e => {
-        setError(e.message)
-        setLoading(false)
-      })
-  }, [merchantId])
+        setError(e.message);
+        setLoading(false);
+      });
+  }, [merchantId]);
 
   if (loading) return (
     <div className="min-h-screen bg-white flex items-center justify-center gap-2">
@@ -57,7 +57,7 @@ export default function LNURLQRPageInner() {
         Loading…
       </span>
     </div>
-  )
+  );
 
   if (error || !info) return (
     <div className="min-h-screen bg-white flex flex-col items-center justify-center gap-4">
@@ -68,11 +68,11 @@ export default function LNURLQRPageInner() {
         ← Back to ZamPOS
       </Link>
     </div>
-  )
+  );
 
   return (
     <>
-      {/* ── Screen-only controls ── */}
+      {/* Screen-only controls */}
       <div className="print:hidden bg-surface border-b border-border px-6 py-3 flex items-center justify-between">
         <Link href="/" className="flex items-center gap-2 text-text-dim hover:text-text text-sm font-mono">
           <ArrowLeft size={14} /> Back
@@ -90,7 +90,7 @@ export default function LNURLQRPageInner() {
         </button>
       </div>
 
-      {/* ── Printable area (UNCHANGED) ── */}
+      {/* Printable area */}
       <div
         className="print:m-0 mx-auto my-4 print:shadow-none"
         style={{
@@ -108,7 +108,6 @@ export default function LNURLQRPageInner() {
           borderRadius: '12px',
         }}
       >
-
         <div style={{ textAlign: 'center', marginBottom: '6mm' }}>
           <div style={{
             display: 'inline-flex',
@@ -143,8 +142,23 @@ export default function LNURLQRPageInner() {
         <p style={{ fontWeight: 800, fontSize: 22 }}>
           {info.shop_name}
         </p>
-
       </div>
     </>
-  )
+  );
+}
+
+// Main page component with Suspense boundary
+export default function LnurlQrPage() {
+  return (
+    <Suspense fallback={
+      <div className="min-h-screen bg-white flex items-center justify-center gap-2">
+        <RefreshCw size={16} className="animate-spin text-[#F7931A]" />
+        <span style={{ fontFamily: 'monospace', fontSize: 14, color: '#666' }}>
+          Loading page...
+        </span>
+      </div>
+    }>
+      <LNURLQRPageInner />
+    </Suspense>
+  );
 }
