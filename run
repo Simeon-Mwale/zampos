@@ -47,11 +47,14 @@ cd frontend
 npm run build  # Must succeed
 
 # Commit and push to develop
-cd ..
 git add .
-git commit -m "feat: your new feature"
+git commit -m "feat: rate service with Binance fallback, realistic 1.35M ZMW/BTC static rate"
 git push origin develop
-
+git checkout main
+git pull origin main
+git merge develop -m "Merge develop: rate improvements and UI fixes"
+git push origin main
+git checkout develop  # Switch back to develop for continued work
 develop branch (test)  →  Vercel preview URL (test only)
          ↓
    (merge when ready)
