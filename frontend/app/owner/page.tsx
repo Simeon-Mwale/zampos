@@ -52,8 +52,15 @@ interface WithdrawalData {
 }
 
 // ── Helpers ──────────────────────────────────────────────────────────────────
-const fmtSats = (n: number) => new Intl.NumberFormat('en-ZM').format(n)
-const fmtZMW  = (n: number) => `K ${n.toFixed(2)}`
+const fmtSats = (n: number | null | undefined) => {
+  if (n === null || n === undefined) return '0'
+  return new Intl.NumberFormat('en-ZM').format(n)
+}
+
+const fmtZMW = (n: number | null | undefined) => {
+  if (n === null || n === undefined) return 'K 0.00'
+  return `K ${n.toFixed(2)}`
+}
 const fmtDate = (s: string) => new Date(s).toLocaleDateString('en-ZM', { day:'2-digit', month:'short', year:'numeric' })
 const fmtTime = (s: string) => new Date(s).toLocaleTimeString('en-ZM', { hour:'2-digit', minute:'2-digit' })
 const toZMW   = (sats: number, rate: RateData | null) =>
