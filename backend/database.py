@@ -370,23 +370,50 @@ async def get_transaction_summary(merchant_id: int):
         return {"total": 0, "paid": 0, "pending": 0, "expired": 0, "total_sats": 0}
 
 async def get_operator_earnings():
-    """Get total operator earnings across all merchants"""
+    """Get total operator earnings across all merchants with sweep tracking"""
     try:
         async with aiosqlite.connect(DB_PATH) as db:
             db.row_factory = aiosqlite.Row
+            
+            # Get operator fees from transactions
             cur = await db.execute("""
-                SELECT COALESCE(SUM(operator_sats), 0) as total_operator_sats,
-                       COALESCE(SUM(gross_sats), 0) as total_volume_sats,
-                       COUNT(*) as total_transactions
+                SELECT 
+                    COALESCE(SUM(operator_sats), 0) as total_operator_sats,
+                    COALESCE(SUM(gross_sats), 0) as total_volume_sats,
+                    COUNT(*) as total_transactions
                 FROM transactions WHERE status='paid'
             """)
             row = await cur.fetchone()
-            if not row:
-                return {"total_operator_sats": 0, "total_volume_sats": 0, "total_transactions": 0}
-            return dict(row)
+            
+            # Get sweep count from operator_sweeps table
+            cur2 = await db.execute("SELECT COUNT(*) as count FROM operator_sweeps")
+            sweep_row = await cur2.fetchone()
+            sweep_count = sweep_row["count"] if sweep_row else 0
+            
+            total_fee_sats = row["total_operator_sats"] if row and row["total_operator_sats"] else 0
+            total_gross_sats = row["total_volume_sats"] if row and row["total_volume_sats"] else 0
+            total_net_sats = total_gross_sats - total_fee_sats
+            
+            return {
+                "total_operator_sats": total_fee_sats,
+                "total_volume_sats": total_gross_sats,
+                "total_transactions": row["total_transactions"] if row else 0,
+                "sweep_count": sweep_count,
+                "total_fee_sats": total_fee_sats,
+                "total_gross_sats": total_gross_sats,
+                "total_net_sats": total_net_sats
+            }
     except Exception as e:
         logger.error(f"get_operator_earnings: {e}")
-        return {"total_operator_sats": 0, "total_volume_sats": 0, "total_transactions": 0}
+        return {
+            "total_operator_sats": 0,
+            "total_volume_sats": 0,
+            "total_transactions": 0,
+            "sweep_count": 0,
+            "total_fee_sats": 0,
+            "total_gross_sats": 0,
+            "total_net_sats": 0
+        }
 
 # ---------------------------------------------
 # WITHDRAWALS
