@@ -7,7 +7,7 @@ import { getMerchantSummary, getMerchantTransactions } from '@/lib/api'
 import { useState, useEffect, useCallback, useRef } from 'react'
 import { 
   Zap, RefreshCw, ChevronRight, X, CheckCircle, Clock, 
-  Settings, Store, AlertCircle, Phone, Wallet, CheckCircle2, ArrowDownToLine 
+  Settings, Store, AlertCircle, Phone, Wallet, CheckCircle2, ArrowDownToLine, LogOut
 } from 'lucide-react'
 import { QRCodeSVG } from 'qrcode.react'
 import { 
@@ -65,6 +65,7 @@ export default function POSPage() {
   const [confirming, setConfirming] = useState(false)
   const [invoiceQueued, setInvoiceQueued] = useState(false)
   const [isEditingSettings, setIsEditingSettings] = useState(false)
+  const [showSwitchConfirm, setShowSwitchConfirm] = useState(false)
 
   // Onboarding state
   const [shopName, setShopName] = useState('')
@@ -112,10 +113,33 @@ export default function POSPage() {
     setPhoneNumber(localStorage.getItem('zampos-phone-number') || '')
     setLightningAddress(localStorage.getItem('zampos-lightning-address') || '')
     setPayoutMode((localStorage.getItem('zampos-payout-mode') as PayoutMode) || 'direct')
-    setLocation('') // location not stored locally, blank is fine
+    setLocation('')
     setError('')
     setFieldErrors({})
     setIsEditingSettings(true)
+    setShowSwitchConfirm(false)
+    setScreen('onboarding')
+  }
+
+  // ── Switch Shop (logout current merchant) ───────────────────────────────────
+  const handleSwitchShop = () => {
+    localStorage.removeItem('zampos-merchant-id')
+    localStorage.removeItem('zampos-shop-name')
+    localStorage.removeItem('zampos-payout-mode')
+    localStorage.removeItem('zampos-phone-number')
+    localStorage.removeItem('zampos-lightning-address')
+    localStorage.removeItem('zampos-custodial-balance')
+    setShopName('')
+    setPhoneNumber('')
+    setLightningAddress('')
+    setLocation('')
+    setPayoutMode('direct')
+    setSummary(null)
+    setTransactions([])
+    setError('')
+    setFieldErrors({})
+    setIsEditingSettings(false)
+    setShowSwitchConfirm(false)
     setScreen('onboarding')
   }
 
@@ -215,7 +239,7 @@ export default function POSPage() {
     try {
       const existingId = getMerchantId()
       const result: MerchantRegisterResponse = await registerMerchant({
-        merchantId: existingId || undefined,  // PATCH if editing, POST if new
+        merchantId: existingId || undefined,
         shopName: shopName.trim(),
         location: location.trim() || undefined,
         phoneNumber: phoneNumber.trim(),
@@ -227,7 +251,6 @@ export default function POSPage() {
       localStorage.setItem('zampos-payout-mode', result.payout_mode)
       localStorage.setItem('zampos-phone-number', result.phone_number)
       localStorage.setItem('zampos-lightning-address', result.lightning_address || '')
-      // Don't reset custodial balance when editing — only on fresh registration
       if (!existingId) {
         localStorage.setItem('zampos-custodial-balance', '0')
       }
@@ -331,7 +354,7 @@ export default function POSPage() {
       <header className="border-b border-border px-6 py-4 flex items-center justify-between">
         <div className="flex items-center gap-3">
           {isEditingSettings && (
-            <button onClick={() => { setIsEditingSettings(false); setScreen('pos') }}
+            <button onClick={() => { setIsEditingSettings(false); setShowSwitchConfirm(false); setScreen('pos') }}
               className="text-text-dim hover:text-text mr-1">← Back</button>
           )}
           <Zap className="text-bitcoin" size={22} fill="#F7931A" />
@@ -460,6 +483,35 @@ export default function POSPage() {
                   ? <><Settings size={18} /> Save Changes</>
                   : <><Zap size={18} fill="currentColor" /> Start Selling ⚡</>}
             </button>
+
+            {/* ── Switch Shop button — only shown in settings ── */}
+            {isEditingSettings && (
+              <>
+                {showSwitchConfirm ? (
+                  <div className="bg-red-400/10 border border-red-400/30 rounded-xl p-4 space-y-3">
+                    <p className="text-red-400 text-xs font-mono text-center">
+                      ⚠️ This will log out <strong>{localStorage.getItem('zampos-shop-name')}</strong> from this device. Are you sure?
+                    </p>
+                    <div className="grid grid-cols-2 gap-2">
+                      <button onClick={() => setShowSwitchConfirm(false)}
+                        className="border border-border text-text-dim font-mono text-sm rounded-xl py-2 hover:border-bitcoin/40">
+                        Cancel
+                      </button>
+                      <button onClick={handleSwitchShop}
+                        className="bg-red-500 text-white font-mono text-sm rounded-xl py-2 hover:bg-red-600 active:scale-95">
+                        Yes, Switch
+                      </button>
+                    </div>
+                  </div>
+                ) : (
+                  <button onClick={() => setShowSwitchConfirm(true)}
+                    className="w-full flex items-center justify-center gap-2 text-text-dim hover:text-red-400
+                               font-mono text-xs py-2 transition-colors">
+                    <LogOut size={13} /> Switch to a different shop
+                  </button>
+                )}
+              </>
+            )}
           </div>
         </div>
       </div>
@@ -547,8 +599,7 @@ export default function POSPage() {
               <ArrowDownToLine size={12} /> {custBalance.toLocaleString()} sats
             </button>
           )}
-          {/* ── Settings gear — pre-fills existing data ── */}
-          <button onClick={openSettings} className="text-text-dim hover:text-bitcoin p-1">
+          <button onClick={openSettings} className="text-text-dim hover:text-bitcoin p-1" title="Shop Settings">
             <Settings size={16} />
           </button>
           <LanguageSwitcher />
