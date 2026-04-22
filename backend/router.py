@@ -6,6 +6,7 @@ from decimal import Decimal
 import os, logging, json
 import aiosqlite
 
+from services.sweep_service import sweep_gas_fees, get_accumulated_gas_fees, get_sweep_history
 from services.rate_service import fetch_live_rates, format_btc_display, get_cache_metadata
 from services.lnurl_pay import fetch_invoice_from_lightning_address, validate_lightning_address, extract_payment_hash
 from services.spread_engine import calculate_spread, apply_spread_to_rate, is_invoiceable
@@ -397,7 +398,49 @@ async def mark_sent(withdrawal_id: int):
     if not ok: raise HTTPException(502, "Failed")
     return {"success": True, "withdrawal_id": withdrawal_id, "status": "sent"}
 
+# ── Auto-Sweep Endpoints ──────────────────────────────────────────────────────
 
+@router.post("/owner/auto-sweep")
+async def auto_sweep_gas_fees(force: bool = Query(False)):
+    """Automatically sweep accumulated gas fees to operator wallet"""
+    try:
+        result = await sweep_gas_fees(force=force)
+        return result
+    except Exception as e:
+        logger.error(f"❌ Auto-sweep error: {e}")
+        raise HTTPException(502, f"Auto-sweep failed: {str(e)}")
+
+
+@router.get("/owner/gas-fees")
+async def get_gas_fees_status():
+    """Get current gas fees accumulation status"""
+    try:
+        total_fees, details = await get_accumulated_gas_fees()
+        return {
+            "total_fees_sats": total_fees,
+            "min_sweep_threshold": int(os.getenv("MIN_SWEEP_SATS", "10000")),
+            "transaction_count": details["transaction_count"],
+            "first_transaction": details["first_transaction"],
+            "last_transaction": details["last_transaction"],
+            "last_sweep_at": details["last_sweep_at"],
+            "last_sweep_amount": details["last_sweep_amount"],
+            "operator_wallet": os.getenv("OPERATOR_WALLET", "flashysuit96@walletofsatoshi.com")
+        }
+    except Exception as e:
+        logger.error(f"❌ Gas fees status error: {e}")
+        raise HTTPException(502, "Failed to get gas fees status")
+
+
+@router.get("/owner/sweep-history")
+async def sweep_history(limit: int = Query(50)):
+    """Get history of operator sweeps"""
+    try:
+        history = await get_sweep_history(limit)
+        return {"sweeps": history, "total": len(history)}
+    except Exception as e:
+        logger.error(f"❌ Sweep history error: {e}")
+        raise HTTPException(502, "Failed to get sweep history")
+    
 # ── Webhook ────────────────────────────────────────────────────────────────────
 
 @router.post("/webhook/payment")
