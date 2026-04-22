@@ -10,7 +10,7 @@ import {
 
 // ── Config ───────────────────────────────────────────────────────────────────
 const API  = process.env.NEXT_PUBLIC_API_URL   || 'http://localhost:8000'
-const OKEY = process.env.NEXT_PUBLIC_OWNER_KEY || ''
+const OKEY = process.env.NEXT_PUBLIC_OWNER_KEY || 'zampos_owner_2026'
 
 // ── Types ────────────────────────────────────────────────────────────────────
 interface EarningsData {
@@ -125,7 +125,7 @@ export default function OwnerDashboard() {
   const [copiedWallet, setCopied]     = useState(false)
 
   const timerRef = useRef<NodeJS.Timeout | null>(null)
-  const WALLET   = 'fossilbean17@phoenixwallet.me'
+  const WALLET   = 'flashysuit96@walletofsatoshi.com'  // ✅ UPDATED to your wallet
 
   // ── Auth ──────────────────────────────────────────────────────────────────
   const login = useCallback(() => {
@@ -310,7 +310,7 @@ export default function OwnerDashboard() {
         <div className="bg-bitcoin/10 border border-bitcoin/30 rounded-2xl p-4 flex items-center gap-3">
           <Bitcoin size={18} className="text-bitcoin" fill="#F7931A" />
           <div className="flex-1 min-w-0">
-            <p className="text-bitcoin font-mono text-xs uppercase tracking-widest">Sweep Destination</p>
+            <p className="text-bitcoin font-mono text-xs uppercase tracking-widest">Sweep Destination (Your Wallet)</p>
             <button onClick={copyWallet}
               className="text-text font-mono text-sm font-bold hover:underline truncate text-left block w-full">
               {WALLET}
@@ -419,6 +419,51 @@ export default function OwnerDashboard() {
             </div>
           ) : null
         )}
+
+        {/* Auto-Sweep Section */}
+<div className="bg-panel border border-border rounded-2xl p-5 space-y-4">
+  <div className="flex items-center justify-between">
+    <p className="text-text-dim text-xs font-mono uppercase tracking-widest">Auto-Sweep Control</p>
+    <button
+      onClick={async () => {
+        setLoading(true)
+        try {
+          const res = await fetch(`${API}/owner/auto-sweep?force=true`, {
+            method: 'POST'
+          })
+          const data = await res.json()
+          if (data.success) {
+            alert(`✅ ${data.message}\nAmount: ${data.amount} sats\nSent to: ${data.wallet}`)
+            await fetchAll()
+          } else {
+            alert(`❌ Sweep failed: ${data.message}`)
+          }
+        } catch (err) {
+          alert('Auto-sweep failed. Check console.')
+        } finally {
+          setLoading(false)
+        }
+      }}
+      disabled={loading || !earnings?.total_fee_sats}
+      className="bg-bitcoin hover:bg-bitcoin-dark disabled:opacity-40 text-surface px-4 py-2 rounded-xl text-xs font-mono font-bold transition-all"
+    >
+      {loading ? 'Sweeping...' : 'Auto-Sweep Now'}
+    </button>
+  </div>
+  <div className="space-y-2">
+    <div className="flex justify-between text-sm font-mono">
+      <span className="text-text-dim">Min sweep threshold:</span>
+      <span className="text-bitcoin font-bold">10,000 sats</span>
+    </div>
+    <div className="flex justify-between text-sm font-mono">
+      <span className="text-text-dim">Your wallet:</span>
+      <span className="text-text truncate ml-2">flashysuit96@walletofsatoshi.com</span>
+    </div>
+    <p className="text-muted text-xs font-mono mt-2">
+      ⚡ Auto-sweep will automatically send accumulated gas fees to your wallet when balance exceeds 10,000 sats.
+    </p>
+  </div>
+</div>
 
         {/* ── MERCHANTS TAB ── */}
         {activeTab === 'merchants' && (
@@ -596,7 +641,7 @@ export default function OwnerDashboard() {
         )}
 
         <footer className="text-center text-muted font-mono text-xs pb-4">
-          🇿🇲 ZamPOS Owner · Fees sweep to Phoenix automatically
+          🇿🇲 ZamPOS Owner · Gas fees accumulate here. Send to your wallet manually when ready.
         </footer>
       </div>
     </main>

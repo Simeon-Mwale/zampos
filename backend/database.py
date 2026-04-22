@@ -94,12 +94,30 @@ async def _migrate(db):
         ("transactions", "operator_sats", "INTEGER DEFAULT 0"),
         ("transactions", "sms_sent", "INTEGER DEFAULT 0"),
         ("transactions", "rate_snapshot", "TEXT"),
+        ("transactions", "operator_swept", "INTEGER DEFAULT 0"),  # NEW
+        ("transactions", "swept_at", "TIMESTAMP"),  # NEW
     ]
     for table, col, definition in cols:
         try:
             await db.execute(f"ALTER TABLE {table} ADD COLUMN {col} {definition}")
         except Exception:
             pass
+    
+    # Create operator_sweeps table if not exists
+    try:
+        await db.execute("""
+            CREATE TABLE IF NOT EXISTS operator_sweeps (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                amount_sats INTEGER NOT NULL,
+                status TEXT DEFAULT 'pending'
+                    CHECK(status IN ('pending','paid','failed')),
+                bolt11 TEXT,
+                swept_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                paid_at TIMESTAMP
+            )
+        """)
+    except Exception:
+        pass
 
 
 # ---------------------------------------------
