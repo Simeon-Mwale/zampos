@@ -64,6 +64,7 @@ export default function POSPage() {
   const [paymentPolling, setPaymentPolling] = useState(false)
   const [confirming, setConfirming] = useState(false)
   const [invoiceQueued, setInvoiceQueued] = useState(false)
+  const [isEditingSettings, setIsEditingSettings] = useState(false)
 
   // Onboarding state
   const [shopName, setShopName] = useState('')
@@ -105,6 +106,19 @@ export default function POSPage() {
   const getCustodialBalance = (): number => 
     parseInt(localStorage.getItem('zampos-custodial-balance') || '0')
 
+  // ── Open Settings (pre-filled) ──────────────────────────────────────────────
+  const openSettings = () => {
+    setShopName(localStorage.getItem('zampos-shop-name') || '')
+    setPhoneNumber(localStorage.getItem('zampos-phone-number') || '')
+    setLightningAddress(localStorage.getItem('zampos-lightning-address') || '')
+    setPayoutMode((localStorage.getItem('zampos-payout-mode') as PayoutMode) || 'direct')
+    setLocation('') // location not stored locally, blank is fine
+    setError('')
+    setFieldErrors({})
+    setIsEditingSettings(true)
+    setScreen('onboarding')
+  }
+
   // ── Data Fetching ───────────────────────────────────────────────────────────
   const fetchRate = useCallback(async (forceRefresh = false) => {
     try {
@@ -127,7 +141,6 @@ export default function POSPage() {
       getMerchantSummary(mid),
       getMerchantTransactions(mid, 200),
     ]).then(([sum, txs]) => {
-      // Unwrap summary: API returns { merchant_id, summary: {...} }
       const summaryData = sum?.summary ?? sum ?? null
       setSummary(summaryData)
       setTransactions(txs || [])
@@ -200,7 +213,9 @@ export default function POSPage() {
     setError('')
     setRegistering(true)
     try {
+      const existingId = getMerchantId()
       const result: MerchantRegisterResponse = await registerMerchant({
+        merchantId: existingId || undefined,  // PATCH if editing, POST if new
         shopName: shopName.trim(),
         location: location.trim() || undefined,
         phoneNumber: phoneNumber.trim(),
@@ -212,7 +227,11 @@ export default function POSPage() {
       localStorage.setItem('zampos-payout-mode', result.payout_mode)
       localStorage.setItem('zampos-phone-number', result.phone_number)
       localStorage.setItem('zampos-lightning-address', result.lightning_address || '')
-      localStorage.setItem('zampos-custodial-balance', '0')
+      // Don't reset custodial balance when editing — only on fresh registration
+      if (!existingId) {
+        localStorage.setItem('zampos-custodial-balance', '0')
+      }
+      setIsEditingSettings(false)
       setScreen('pos')
       fetchRate(true)
     } catch (err: any) {
@@ -306,11 +325,15 @@ export default function POSPage() {
     `w-full bg-surface border rounded-xl px-4 py-3 text-text font-body outline-none transition-colors placeholder:text-muted
      ${err ? 'border-red-400' : 'border-border focus:border-bitcoin'}`
 
-  // ── ONBOARDING SCREEN ───────────────────────────────────────────────────────
+  // ── ONBOARDING / SETTINGS SCREEN ────────────────────────────────────────────
   if (screen === 'onboarding') return (
     <main className="min-h-screen bg-surface flex flex-col">
       <header className="border-b border-border px-6 py-4 flex items-center justify-between">
         <div className="flex items-center gap-3">
+          {isEditingSettings && (
+            <button onClick={() => { setIsEditingSettings(false); setScreen('pos') }}
+              className="text-text-dim hover:text-text mr-1">← Back</button>
+          )}
           <Zap className="text-bitcoin" size={22} fill="#F7931A" />
           <span className="font-display font-bold text-lg tracking-tight text-text">{t.appName}</span>
         </div>
@@ -321,10 +344,16 @@ export default function POSPage() {
         <div className="w-full max-w-sm space-y-5">
           <div className="text-center space-y-2">
             <div className="inline-flex items-center justify-center w-16 h-16 rounded-2xl bg-bitcoin/10 mb-2">
-              <Store size={28} className="text-bitcoin" />
+              {isEditingSettings ? <Settings size={28} className="text-bitcoin" /> : <Store size={28} className="text-bitcoin" />}
             </div>
-            <h1 className="font-display font-bold text-2xl text-text">Welcome to ZamPOS ⚡</h1>
-            <p className="text-text-dim font-body text-sm">Set up your shop to start accepting Bitcoin Lightning payments.</p>
+            <h1 className="font-display font-bold text-2xl text-text">
+              {isEditingSettings ? '⚙️ Shop Settings' : 'Welcome to ZamPOS ⚡'}
+            </h1>
+            <p className="text-text-dim font-body text-sm">
+              {isEditingSettings 
+                ? 'Update your shop details or switch payment mode.'
+                : 'Set up your shop to start accepting Bitcoin Lightning payments.'}
+            </p>
           </div>
 
           <div className="bg-panel border border-border rounded-2xl p-5 space-y-4">
@@ -426,8 +455,10 @@ export default function POSPage() {
                          text-surface font-display font-bold text-lg rounded-2xl py-4
                          flex items-center justify-center gap-2 transition-all active:scale-95">
               {registering
-                ? <><RefreshCw size={18} className="animate-spin" /> Verifying &amp; saving...</>
-                : <><Zap size={18} fill="currentColor" /> Start Selling ⚡</>}
+                ? <><RefreshCw size={18} className="animate-spin" /> Saving...</>
+                : isEditingSettings
+                  ? <><Settings size={18} /> Save Changes</>
+                  : <><Zap size={18} fill="currentColor" /> Start Selling ⚡</>}
             </button>
           </div>
         </div>
@@ -516,7 +547,8 @@ export default function POSPage() {
               <ArrowDownToLine size={12} /> {custBalance.toLocaleString()} sats
             </button>
           )}
-          <button onClick={() => setScreen('onboarding')} className="text-text-dim hover:text-bitcoin p-1">
+          {/* ── Settings gear — pre-fills existing data ── */}
+          <button onClick={openSettings} className="text-text-dim hover:text-bitcoin p-1">
             <Settings size={16} />
           </button>
           <LanguageSwitcher />
@@ -536,7 +568,6 @@ export default function POSPage() {
         <div className="flex-1 flex flex-col items-center justify-center px-6 py-8 animate-fade-in">
           <div className="w-full max-w-sm space-y-5">
 
-            {/* Custodial balance banner */}
             {savedMode === 'custodial' && custBalance > 0 && (
               <button onClick={() => setScreen('withdraw')}
                 className="w-full bg-bitcoin/10 border border-bitcoin/30 rounded-2xl p-4
@@ -549,7 +580,6 @@ export default function POSPage() {
               </button>
             )}
 
-            {/* Offline queued confirmation */}
             {invoiceQueued && (
               <div className="bg-amber-400/10 border border-amber-400/30 rounded-2xl p-4 flex items-start gap-3">
                 <Clock size={16} className="text-amber-400 shrink-0 mt-0.5" />
@@ -563,7 +593,6 @@ export default function POSPage() {
               </div>
             )}
 
-            {/* Amount input */}
             <div className="bg-panel border border-border rounded-2xl p-6 space-y-2">
               <label className="text-text-dim text-xs font-mono uppercase tracking-widest">{t.amountLabel}</label>
               <div className="flex items-center gap-2">
@@ -582,7 +611,6 @@ export default function POSPage() {
               </div>
             </div>
 
-            {/* Memo */}
             <div className="bg-panel border border-border rounded-2xl p-4 space-y-1">
               <label className="text-text-dim text-xs font-mono uppercase tracking-widest">{t.memoLabel}</label>
               <input type="text" value={memo} maxLength={80}
@@ -593,7 +621,6 @@ export default function POSPage() {
 
             {error && <p className="text-red-400 text-sm font-mono text-center bg-red-400/10 rounded-lg p-2">{error}</p>}
 
-            {/* Charge button */}
             <button onClick={handleCharge}
               disabled={loading || !zmwAmount || zmwAmount <= 0 || rateLoading}
               className="w-full bg-bitcoin hover:bg-bitcoin-dark disabled:opacity-40 disabled:cursor-not-allowed
@@ -611,10 +638,8 @@ export default function POSPage() {
               <p className="text-center text-muted text-xs font-mono">🏦 Sweep mode — sats accumulate until you withdraw</p>
             )}
 
-            {/* Summary Card - Always render, component handles empty state */}
             <SummaryCard summary={summary ?? undefined} transactions={transactions} />
 
-            {/* Static LNURL QR Card */}
             {isMerchantConfigured() && (
               <StaticQRCard
                 merchantId={getMerchantId()}
@@ -623,7 +648,6 @@ export default function POSPage() {
                   : undefined}
               />
             )}
-
           </div>
         </div>
       )}

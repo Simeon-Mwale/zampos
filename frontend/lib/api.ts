@@ -108,9 +108,15 @@ export const getRate = async (forceRefresh = false): Promise<RateResponse> => {
     if (!data?.zmw_per_btc || data.zmw_per_btc <= 0) throw new Error('Invalid rate')
     return data
   } catch {
-    return { zmw_per_btc: 1500000, displayed_zmw_per_btc: 1492500,
-             sats_per_zmw: 0.06666667, last_updated: null, source: 'fallback',
-             warning: 'Using fallback rates — check connection' }
+    // Updated fallback to realistic ZMW/BTC rate
+    return {
+      zmw_per_btc: 1900000,
+      displayed_zmw_per_btc: 1890500,
+      sats_per_zmw: 0.00000053,
+      last_updated: null,
+      source: 'fallback',
+      warning: 'Using fallback rates — check connection'
+    }
   }
 }
 
@@ -123,8 +129,10 @@ export const createInvoice = async (
   if (!mid || mid <= 0) throw new Error('Merchant not registered')
   if (amount_zmw <= 0) throw new Error('Invalid amount')
   const { data } = await api.post<InvoiceResponse>('/create', {
-    merchant_id: mid, amount_zmw: parseFloat(amount_zmw.toFixed(2)),
-    memo: memo?.trim() || 'ZamPOS Payment', lock_rate: true,
+    merchant_id: mid,
+    amount_zmw: parseFloat(amount_zmw.toFixed(2)),
+    memo: memo?.trim() || 'ZamPOS Payment',
+    lock_rate: true,
   })
   return data
 }
@@ -144,19 +152,30 @@ export const confirmPaid = async (payment_hash: string): Promise<{ success: bool
 // ── Merchant ───────────────────────────────────────────────────────────────────
 
 export const registerMerchant = async (params: {
+  merchantId?: number          // present when editing existing merchant
   shopName: string
   location?: string
   phoneNumber: string
   payoutMode: PayoutMode
   lightningAddress?: string
 }): Promise<MerchantRegisterResponse> => {
-  const { data } = await api.post<MerchantRegisterResponse>('/merchant/register', {
+  const payload = {
     shop_name:         params.shopName.trim(),
     location:          params.location?.trim() || undefined,
     phone_number:      params.phoneNumber.trim(),
     payout_mode:       params.payoutMode,
     lightning_address: params.lightningAddress?.trim().toLowerCase() || undefined,
-  })
+  }
+
+  // PATCH if updating existing merchant, POST if new
+  if (params.merchantId && params.merchantId > 0) {
+    const { data } = await api.patch<MerchantRegisterResponse>(
+      `/merchant/${params.merchantId}`, payload
+    )
+    return data
+  }
+
+  const { data } = await api.post<MerchantRegisterResponse>('/merchant/register', payload)
   return data
 }
 

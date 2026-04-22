@@ -25,3 +25,35 @@ git checkout v2-sms-testing
 git checkout main 
 
 npm run build
+
+# You're on develop branch
+git branch
+# * develop
+#   main
+
+# Switch to main (production)
+git checkout main
+
+# Switch back to develop (testing)
+git checkout develop
+
+
+# Stay on develop for all new features
+git checkout develop
+
+# Make changes to frontend code
+# Test locally first!
+cd frontend
+npm run build  # Must succeed
+
+# Commit and push to develop
+cd ..
+git add .
+git commit -m "feat: your new feature"
+git push origin develop
+
+develop branch (test)  →  Vercel preview URL (test only)
+         ↓
+   (merge when ready)
+         ↓
+main branch (production) → zampos.vercel.app (live users)
