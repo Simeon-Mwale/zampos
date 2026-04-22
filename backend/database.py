@@ -300,13 +300,25 @@ async def mark_sms_sent(payment_hash: str):
         logger.error(f"mark_sms_sent: {e}")
         return False
 
-async def get_merchant_transactions(merchant_id: int, limit: int = 50):
+async def get_merchant_transactions(merchant_id: int, limit: int = 50, status: Optional[str] = None):
+    """Get merchant transactions with optional status filter"""
     try:
         async with aiosqlite.connect(DB_PATH) as db:
             db.row_factory = aiosqlite.Row
-            cur = await db.execute("""
-                SELECT * FROM transactions WHERE merchant_id = ? ORDER BY id DESC LIMIT ?
-            """, (merchant_id, limit))
+            
+            if status:
+                cur = await db.execute("""
+                    SELECT * FROM transactions 
+                    WHERE merchant_id = ? AND status = ? 
+                    ORDER BY id DESC LIMIT ?
+                """, (merchant_id, status, limit))
+            else:
+                cur = await db.execute("""
+                    SELECT * FROM transactions 
+                    WHERE merchant_id = ? 
+                    ORDER BY id DESC LIMIT ?
+                """, (merchant_id, limit))
+            
             rows = await cur.fetchall()
             results = []
             for row in rows:
@@ -317,7 +329,7 @@ async def get_merchant_transactions(merchant_id: int, limit: int = 50):
     except Exception as e:
         logger.error(f"get_merchant_transactions: {e}")
         return []
-
+    
 async def get_transaction_summary(merchant_id: int):
     try:
         async with aiosqlite.connect(DB_PATH) as db:
@@ -339,7 +351,8 @@ async def get_transaction_summary(merchant_id: int):
         logger.error(f"get_transaction_summary: {e}")
         return {"total": 0, "paid": 0, "pending": 0, "expired": 0, "total_sats": 0}
 
-async def get_operator_earnings(merchant_id: int):
+async def get_operator_earnings():
+    """Get total operator earnings across all merchants"""
     try:
         async with aiosqlite.connect(DB_PATH) as db:
             db.row_factory = aiosqlite.Row
@@ -347,8 +360,8 @@ async def get_operator_earnings(merchant_id: int):
                 SELECT COALESCE(SUM(operator_sats), 0) as total_operator_sats,
                        COALESCE(SUM(gross_sats), 0) as total_volume_sats,
                        COUNT(*) as total_transactions
-                FROM transactions WHERE merchant_id=?
-            """, (merchant_id,))
+                FROM transactions WHERE status='paid'
+            """)
             row = await cur.fetchone()
             if not row:
                 return {"total_operator_sats": 0, "total_volume_sats": 0, "total_transactions": 0}
@@ -356,7 +369,6 @@ async def get_operator_earnings(merchant_id: int):
     except Exception as e:
         logger.error(f"get_operator_earnings: {e}")
         return {"total_operator_sats": 0, "total_volume_sats": 0, "total_transactions": 0}
-
 
 # ---------------------------------------------
 # WITHDRAWALS

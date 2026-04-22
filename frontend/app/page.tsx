@@ -12,7 +12,7 @@ import {
 import { QRCodeSVG } from 'qrcode.react'
 import { 
   getRate, createInvoice, checkPaymentStatus, confirmPaid, 
-  registerMerchant, requestWithdrawal 
+  registerMerchant, requestWithdrawal, updateMerchant
 } from '@/lib/api'
 import type { 
   InvoiceResponse, RateResponse, MerchantRegisterResponse, PayoutMode 
@@ -217,8 +217,14 @@ export default function POSPage() {
   // ── Validation ──────────────────────────────────────────────────────────────
   const validateOnboarding = (): boolean => {
     const errs: Record<string, string> = {}
-    if (!shopName.trim() || shopName.trim().length < 2)
-      errs.shopName = 'At least 2 characters'
+    
+    // Only validate shop_name for NEW merchants, not when editing
+    const existingId = getMerchantId()
+    if (!existingId || existingId === 0) {
+      if (!shopName.trim() || shopName.trim().length < 2)
+        errs.shopName = 'At least 2 characters'
+    }
+    
     if (!phoneNumber.trim() || !isValidPhone(phoneNumber))
       errs.phoneNumber = 'Enter a valid phone number (e.g. 0971234567)'
     if (payoutMode === 'direct') {
@@ -238,27 +244,59 @@ export default function POSPage() {
     setRegistering(true)
     try {
       const existingId = getMerchantId()
-      const result: MerchantRegisterResponse = await registerMerchant({
-        merchantId: existingId || undefined,
-        shopName: shopName.trim(),
-        location: location.trim() || undefined,
-        phoneNumber: phoneNumber.trim(),
-        payoutMode,
-        lightningAddress: payoutMode === 'direct' ? lightningAddress.trim().toLowerCase() : undefined,
-      })
-      localStorage.setItem('zampos-merchant-id', result.merchant_id.toString())
-      localStorage.setItem('zampos-shop-name', result.shop_name)
-      localStorage.setItem('zampos-payout-mode', result.payout_mode)
-      localStorage.setItem('zampos-phone-number', result.phone_number)
-      localStorage.setItem('zampos-lightning-address', result.lightning_address || '')
-      if (!existingId) {
+      
+      if (existingId && existingId > 0) {
+        // UPDATE existing merchant - ONLY send updatable fields
+        const updateData: {
+          phone_number?: string
+          lightning_address?: string
+          location?: string
+          payout_mode?: PayoutMode
+        } = {
+          phone_number: phoneNumber.trim(),
+          payout_mode: payoutMode,
+        }
+        if (lightningAddress && payoutMode === 'direct') {
+          updateData.lightning_address = lightningAddress.trim().toLowerCase()
+        }
+        if (location && location.trim()) {
+          updateData.location = location.trim()
+        }
+        
+        // FIXED: Use updateMerchant (imported), not updateMerchantSettings
+        await updateMerchant(existingId, updateData)
+        
+        // Update localStorage
+        localStorage.setItem('zampos-shop-name', shopName.trim())
+        localStorage.setItem('zampos-phone-number', phoneNumber.trim())
+        localStorage.setItem('zampos-payout-mode', payoutMode)
+        if (lightningAddress) {
+          localStorage.setItem('zampos-lightning-address', lightningAddress.trim().toLowerCase())
+        }
+        
+      } else {
+        // NEW merchant - all fields allowed
+        const result: MerchantRegisterResponse = await registerMerchant({
+          shopName: shopName.trim(),
+          location: location.trim() || undefined,
+          phoneNumber: phoneNumber.trim(),
+          payoutMode,
+          lightningAddress: payoutMode === 'direct' ? lightningAddress.trim().toLowerCase() : undefined,
+        })
+        localStorage.setItem('zampos-merchant-id', result.merchant_id.toString())
+        localStorage.setItem('zampos-shop-name', result.shop_name)
+        localStorage.setItem('zampos-payout-mode', result.payout_mode)
+        localStorage.setItem('zampos-phone-number', result.phone_number)
+        localStorage.setItem('zampos-lightning-address', result.lightning_address || '')
         localStorage.setItem('zampos-custodial-balance', '0')
       }
+      
       setIsEditingSettings(false)
       setScreen('pos')
       fetchRate(true)
     } catch (err: any) {
-      setError(err?.response?.data?.detail || 'Registration failed')
+      console.error('Update error:', err)
+      setError(err?.userMessage || err?.response?.data?.detail || 'Registration failed')
     } finally {
       setRegistering(false)
     }
@@ -289,7 +327,7 @@ export default function POSPage() {
         setScreen('invoice')
       }
     } catch (err: any) {
-      setError(err?.response?.data?.detail || t.errorInvoice || 'Failed to create invoice')
+      setError(err?.userMessage || err?.response?.data?.detail || t.errorInvoice || 'Failed to create invoice')
     } finally {
       setLoading(false)
     }
@@ -322,7 +360,7 @@ export default function POSPage() {
       localStorage.setItem('zampos-custodial-balance', '0')
       setWithdrawResult(r.message)
     } catch (err: any) {
-      setError(err?.response?.data?.detail || 'Withdrawal request failed')
+      setError(err?.userMessage || err?.response?.data?.detail || 'Withdrawal request failed')
     } finally {
       setWithdrawing(false)
     }
@@ -380,16 +418,26 @@ export default function POSPage() {
           </div>
 
           <div className="bg-panel border border-border rounded-2xl p-5 space-y-4">
-            {/* Shop Name */}
+            {/* Shop Name - disabled when editing settings */}
             <div className="space-y-1">
               <label className="text-text-dim text-xs font-mono uppercase tracking-widest flex items-center gap-1">
                 <Store size={11} /> Shop Name <span className="text-bitcoin ml-0.5">*</span>
               </label>
-              <input type="text" value={shopName} autoFocus maxLength={100}
+              <input 
+                type="text" 
+                value={shopName} 
+                disabled={isEditingSettings}
+                maxLength={100}
                 onChange={e => { setShopName(e.target.value); setFieldErrors(p => ({...p, shopName: ''})) }}
                 placeholder="e.g., Mama Ntemba's Groundnuts"
-                className={inputClass(fieldErrors.shopName)} />
+                className={`${inputClass(fieldErrors.shopName)} ${isEditingSettings ? 'bg-surface/50 text-text-dim cursor-not-allowed' : ''}`} 
+              />
               {fieldErrors.shopName && <p className="text-red-400 text-xs font-mono">{fieldErrors.shopName}</p>}
+              {isEditingSettings && (
+                <p className="text-amber-400/80 text-xs font-mono flex items-center gap-1 mt-1">
+                  <AlertCircle size={10} /> Shop name cannot be changed after creation
+                </p>
+              )}
             </div>
 
             {/* Location */}
@@ -473,7 +521,7 @@ export default function POSPage() {
             {error && <p className="text-red-400 text-sm font-mono text-center bg-red-400/10 rounded-lg p-3">{error}</p>}
 
             <button onClick={handleRegister}
-              disabled={registering || !shopName.trim() || !phoneNumber.trim()}
+              disabled={registering || (!isEditingSettings && (!shopName.trim() || !phoneNumber.trim()))}
               className="w-full bg-bitcoin hover:bg-bitcoin-dark disabled:opacity-40 disabled:cursor-not-allowed
                          text-surface font-display font-bold text-lg rounded-2xl py-4
                          flex items-center justify-center gap-2 transition-all active:scale-95">

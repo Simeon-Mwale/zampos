@@ -98,6 +98,33 @@ export interface WithdrawalResponse {
   message: string
 }
 
+// ── Helper: Extract error message from 422 response ───────────────────────────
+const extractErrorMessage = (error: unknown): string => {
+  if (axios.isAxiosError(error)) {
+    // Handle 422 validation errors
+    if (error.response?.status === 422) {
+      const detail = error.response?.data?.detail
+      if (Array.isArray(detail) && detail.length > 0) {
+        // Extract first validation error message
+        const firstError = detail[0]
+        if (firstError.msg) return firstError.msg
+        if (firstError.message) return firstError.message
+        return `${firstError.loc?.join('.') || 'Field'}: ${firstError.msg || 'Invalid value'}`
+      }
+      if (typeof detail === 'string') return detail
+      return 'Validation error. Please check your input.'
+    }
+    // Handle other error responses
+    if (error.response?.data?.detail) {
+      return typeof error.response.data.detail === 'string' 
+        ? error.response.data.detail 
+        : JSON.stringify(error.response.data.detail)
+    }
+    if (error.message) return error.message
+  }
+  return 'An unexpected error occurred'
+}
+
 // ── Rate ───────────────────────────────────────────────────────────────────────
 
 export const getRate = async (forceRefresh = false): Promise<RateResponse> => {
@@ -110,9 +137,9 @@ export const getRate = async (forceRefresh = false): Promise<RateResponse> => {
   } catch {
     // Updated fallback to realistic ZMW/BTC rate
     return {
-      zmw_per_btc: 1900000,
-      displayed_zmw_per_btc: 1890500,
-      sats_per_zmw: 0.00000053,
+      zmw_per_btc: 1350000,
+      displayed_zmw_per_btc: 1343250,
+      sats_per_zmw: 0.00000074,
       last_updated: null,
       source: 'fallback',
       warning: 'Using fallback rates — check connection'
@@ -159,6 +186,28 @@ export const registerMerchant = async (params: {
   payoutMode: PayoutMode
   lightningAddress?: string
 }): Promise<MerchantRegisterResponse> => {
+  // PATCH if updating existing merchant
+  if (params.merchantId && params.merchantId > 0) {
+    // For PATCH, ONLY send updatable fields (no shop_name)
+    const patchPayload: {
+      phone_number?: string
+      lightning_address?: string
+      location?: string
+      payout_mode?: string
+    } = {}
+    
+    if (params.phoneNumber) patchPayload.phone_number = params.phoneNumber.trim()
+    if (params.lightningAddress) patchPayload.lightning_address = params.lightningAddress.trim().toLowerCase()
+    if (params.location) patchPayload.location = params.location.trim()
+    if (params.payoutMode) patchPayload.payout_mode = params.payoutMode
+    
+    const { data } = await api.patch<MerchantRegisterResponse>(
+      `/merchant/${params.merchantId}`, patchPayload
+    )
+    return data
+  }
+
+  // POST for new merchant (all fields allowed)
   const payload = {
     shop_name:         params.shopName.trim(),
     location:          params.location?.trim() || undefined,
@@ -167,16 +216,24 @@ export const registerMerchant = async (params: {
     lightning_address: params.lightningAddress?.trim().toLowerCase() || undefined,
   }
 
-  // PATCH if updating existing merchant, POST if new
-  if (params.merchantId && params.merchantId > 0) {
-    const { data } = await api.patch<MerchantRegisterResponse>(
-      `/merchant/${params.merchantId}`, payload
-    )
-    return data
-  }
-
   const { data } = await api.post<MerchantRegisterResponse>('/merchant/register', payload)
   return data
+}
+export const updateMerchant = async (
+  merchantId: number,
+  data: {
+    phone_number?: string
+    lightning_address?: string
+    location?: string
+    payout_mode?: PayoutMode
+  }
+): Promise<MerchantResponse> => {
+  // Filter out undefined values to only send allowed fields
+  const cleanData = Object.fromEntries(
+    Object.entries(data).filter(([_, v]) => v !== undefined && v !== null)
+  )
+  const { data: response } = await api.patch<MerchantResponse>(`/merchant/${merchantId}`, cleanData)
+  return response
 }
 
 export const getMerchant = async (merchant_id: number): Promise<MerchantResponse> => {
@@ -217,16 +274,22 @@ export const getWithdrawals = async (merchant_id: number) => {
   return data
 }
 
-// ── Interceptor ────────────────────────────────────────────────────────────────
+// ── Interceptor with improved error extraction ────────────────────────────────
 
 api.interceptors.response.use(
-  r => r,
+  response => response,
   (error: AxiosError) => {
+    // Attach a user-friendly error message to the error object
+    const userMessage = extractErrorMessage(error)
+    ;(error as any).userMessage = userMessage
+    
     if (error.response?.status === 404) error.message = 'Endpoint not found'
     else if (error.response?.status === 502) error.message = 'Service unavailable. Retry.'
     else if (typeof navigator !== 'undefined' && !navigator.onLine) error.message = 'You are offline'
+    
     return Promise.reject(error)
   }
 )
 
+export { extractErrorMessage }
 export default api
