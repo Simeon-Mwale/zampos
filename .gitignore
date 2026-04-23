@@ -41,5 +41,9 @@ npm-debug.log*
 .vscode/
 .idea/
 *.swp
+
+backend/.breez_data/
+*.sqlite
+*.db"backend/.breez_data/" 
 "backend/.breez_data/" 
 "*.sql" 
