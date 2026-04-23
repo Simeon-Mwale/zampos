@@ -45,3 +45,5 @@ npm-debug.log*
 backend/.breez_data/
 *.sqlite
 *.db"backend/.breez_data/" 
+"backend/.breez_data/" 
+"*.sql" 
