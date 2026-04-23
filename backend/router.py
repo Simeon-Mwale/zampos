@@ -233,7 +233,7 @@ async def get_merchant_summary(merchant_id: int):
 # ── Custodial Withdrawal ───────────────────────────────────────────────────────
 
 @router.post("/merchant/{merchant_id}/withdraw")
-async def request_withdrawal(merchant_id: int, req: WithdrawRequest):
+async def request_withdrawal(merchant_id: int, req: WithdrawRequest, background_tasks: BackgroundTasks):
     m = await get_merchant_by_id(merchant_id)
     if not m: raise HTTPException(404, "Merchant not found")
     if m["payout_mode"] != "custodial": raise HTTPException(400, "Only available for custodial merchants")
@@ -249,11 +249,32 @@ async def request_withdrawal(merchant_id: int, req: WithdrawRequest):
     if not await debit_custodial_balance(merchant_id, amount_sats):
         raise HTTPException(502, "Failed to debit balance. Try again.")
 
-    w = await create_withdrawal(merchant_id=merchant_id, amount_sats=amount_sats,
-                                 lightning_address=req.lightning_address, note=req.note)
-    logger.info(f"📤 Withdrawal | merchant={merchant_id} | {amount_sats} sats → {req.lightning_address}")
-    return {**w, "remaining_balance_sats": balance - amount_sats,
-            "message": f"Withdrawal of {amount_sats:,} sats requested. You'll receive them shortly."}
+    w = await create_withdrawal(
+        merchant_id=merchant_id,
+        amount_sats=amount_sats,
+        lightning_address=req.lightning_address,
+        note=req.note
+    )
+
+    # 🔥 Auto-pay via Alby in background
+    background_tasks.add_task(
+        _auto_payout_alby,
+        withdrawal_id=w,
+        merchant_id=merchant_id,
+        amount_sats=amount_sats,
+        lightning_address=req.lightning_address,
+        shop_name=m["shop_name"],
+    )
+
+    logger.info(f"📤 Withdrawal queued | merchant={merchant_id} | {amount_sats} sats → {req.lightning_address}")
+    return {
+        "withdrawal_id": w,
+        "amount_sats": amount_sats,
+        "lightning_address": req.lightning_address,
+        "status": "processing",
+        "remaining_balance_sats": balance - amount_sats,
+        "message": f"Withdrawal of {amount_sats:,} sats is being processed automatically ⚡",
+    }
 
 
 @router.get("/merchant/{merchant_id}/withdrawals")
@@ -638,7 +659,23 @@ async def _poll_payment(payment_hash, merchant_id, gross_sats, payout_mode,
         except Exception as e: logger.debug(f"Poll: {e}")
         await asyncio.sleep(interval)
 
-
+async def _auto_payout_alby(withdrawal_id, merchant_id, amount_sats, lightning_address, shop_name):
+    from services.alby_service import pay_lightning_address
+    try:
+        result = await pay_lightning_address(
+            lightning_address=lightning_address,
+            amount_sats=amount_sats,
+            memo=f"ZamPOS withdrawal · {shop_name}",
+        )
+        if result["success"]:
+            await mark_withdrawal_sent(withdrawal_id)
+            logger.info(f"✅ Auto-payout success | withdrawal={withdrawal_id} | hash={result['payment_hash']}")
+        else:
+            await mark_withdrawal_failed(withdrawal_id, result["error"])
+            logger.error(f"❌ Auto-payout failed | withdrawal={withdrawal_id} | {result['error']}")
+    except Exception as e:
+        await mark_withdrawal_failed(withdrawal_id, str(e))
+        logger.error(f"❌ Auto-payout exception | {e}")
 async def _send_sms_notification(payment_hash, merchant_phone, shop_name, amount_zmw, gross_sats, lightning_address):
     r = await send_payment_confirmation(phone_number=merchant_phone, shop_name=shop_name,
                                          amount_zmw=amount_zmw, gross_sats=gross_sats,
