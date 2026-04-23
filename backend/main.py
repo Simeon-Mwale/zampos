@@ -33,7 +33,18 @@ async def lifespan(app: FastAPI):
     await init_db()
     logger.info("✅ Database ready")
 
-    # FIX: proper async task handling (was unsafe before)
+    # Initialize Breez for auto-withdrawals
+    try:
+        from services.breez_service import init_breez
+        breez_ok = await init_breez()
+        if breez_ok:
+            logger.info("⚡ Breez SDK ready for withdrawals")
+        else:
+            logger.warning("⚠️ Breez SDK not available (withdrawals will need manual processing)")
+    except Exception as e:
+        logger.warning(f"⚠️ Breez init failed: {e}")
+
+    # Start rate cache warming
     try:
         from services.rate_service import fetch_live_rates
         asyncio.create_task(fetch_live_rates(force_refresh=True))
@@ -42,6 +53,14 @@ async def lifespan(app: FastAPI):
         logger.warning(f"⚠️ Rate warmup failed: {e}")
 
     yield
+
+    # Cleanup Breez on shutdown
+    try:
+        from services.breez_service import close_breez
+        await close_breez()
+        logger.info("🔌 Breez SDK closed")
+    except Exception as e:
+        logger.warning(f"⚠️ Breez close failed: {e}")
 
     logger.info("🛑 ZamPOS v2 shutting down")
 
@@ -93,12 +112,28 @@ app.include_router(router, prefix="", tags=["zampos"])
 
 @app.get("/health")
 async def health():
+    # Check Breez status
+    breez_status = "not configured"
+    breez_balance = None
+    try:
+        from services.breez_service import get_breez_balance
+        balance = await get_breez_balance()
+        if balance >= 0:
+            breez_status = "online"
+            breez_balance = balance
+        else:
+            breez_status = "offline"
+    except:
+        pass
+    
     return {
-        "status":  "healthy",
+        "status": "healthy",
         "version": "2.0.0",
-        "model":   "direct-lightning-address + custodial",
-        "spread":  f"{os.getenv('ZAMPOS_SPREAD_PCT', '0.5')}%",
-        "sms":     os.getenv("AFRICASTALKING_USERNAME", "not configured"),
+        "model": "direct-lightning-address + custodial",
+        "spread": f"{os.getenv('ZAMPOS_SPREAD_PCT', '0.5')}%",
+        "sms": os.getenv("AFRICASTALKING_USERNAME", "not configured"),
+        "breez": breez_status,
+        "breez_balance_sats": breez_balance,
     }
 
 
@@ -123,7 +158,7 @@ async def server_error(request: Request, exc):
 
 
 # ─────────────────────────────────────────────────────────────
-# ENTRYPOINT
+# ENTRYWPOINT
 # ─────────────────────────────────────────────────────────────
 
 if __name__ == "__main__":
