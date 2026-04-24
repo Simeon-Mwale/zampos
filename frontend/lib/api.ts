@@ -1,4 +1,4 @@
-// frontend/lib/api.ts — ZamPOS v2.1: Direct + Custodial modes
+// frontend/lib/api.ts — ZamPOS v2.2: Production Ready with Recovery Code Support
 import axios, { AxiosError } from 'axios'
 
 const api = axios.create({
@@ -56,6 +56,8 @@ export interface MerchantRegisterResponse {
   lightning_address: string | null
   custodial_balance_sats: number
   created_at: string
+  recovery_code?: string           // ← ADDED: FREE account recovery
+  recovery_warning?: string        // ← ADDED: Warning to save code
   wallet_min_sats?: number
   wallet_max_sats?: number
   wallet_domain?: string
@@ -70,6 +72,7 @@ export interface MerchantResponse {
   lightning_address: string | null
   custodial_balance_sats: number
   created_at: string
+  recovery_code?: string           // ← ADDED: For account recovery
 }
 
 export interface Transaction {
@@ -98,6 +101,24 @@ export interface WithdrawalResponse {
   message: string
 }
 
+export interface RecoverRequest {
+  phone_number: string
+  recovery_code: string
+}
+
+export interface RecoverResponse {
+  success: boolean
+  merchant_id: number
+  shop_name: string
+  phone_number: string
+  payout_mode: PayoutMode
+  lightning_address: string | null
+  custodial_balance_sats: number
+  location: string | null
+  recovery_code: string
+  message: string
+}
+
 // ── Helper: Extract error message from 422 response ───────────────────────────
 const extractErrorMessage = (error: unknown): string => {
   if (axios.isAxiosError(error)) {
@@ -105,7 +126,6 @@ const extractErrorMessage = (error: unknown): string => {
     if (error.response?.status === 422) {
       const detail = error.response?.data?.detail
       if (Array.isArray(detail) && detail.length > 0) {
-        // Extract first validation error message
         const firstError = detail[0]
         if (firstError.msg) return firstError.msg
         if (firstError.message) return firstError.message
@@ -113,6 +133,13 @@ const extractErrorMessage = (error: unknown): string => {
       }
       if (typeof detail === 'string') return detail
       return 'Validation error. Please check your input.'
+    }
+    // Handle 409 duplicate errors
+    if (error.response?.status === 409) {
+      const detail = error.response?.data?.detail
+      if (detail?.message) return detail.message
+      if (typeof detail === 'string') return detail
+      return 'This phone number or shop name is already registered.'
     }
     // Handle other error responses
     if (error.response?.data?.detail) {
@@ -135,7 +162,6 @@ export const getRate = async (forceRefresh = false): Promise<RateResponse> => {
     if (!data?.zmw_per_btc || data.zmw_per_btc <= 0) throw new Error('Invalid rate')
     return data
   } catch {
-    // Updated fallback to realistic ZMW/BTC rate
     return {
       zmw_per_btc: 1350000,
       displayed_zmw_per_btc: 1343250,
@@ -145,6 +171,24 @@ export const getRate = async (forceRefresh = false): Promise<RateResponse> => {
       warning: 'Using fallback rates — check connection'
     }
   }
+}
+
+// ── Account Recovery (FREE - no SMS cost) ─────────────────────────────────────
+
+export const recoverAccount = async (
+  phone_number: string,
+  recovery_code: string
+): Promise<RecoverResponse> => {
+  const { data } = await api.post<RecoverResponse>('/merchant/recover', {
+    phone_number,
+    recovery_code: recovery_code.toUpperCase()
+  })
+  return data
+}
+
+export const generateNewRecoveryCode = async (merchant_id: number): Promise<{ success: boolean; recovery_code: string; recovery_warning: string }> => {
+  const { data } = await api.post(`/merchant/generate-recovery?merchant_id=${merchant_id}`)
+  return data
 }
 
 // ── Invoice ────────────────────────────────────────────────────────────────────
@@ -179,7 +223,7 @@ export const confirmPaid = async (payment_hash: string): Promise<{ success: bool
 // ── Merchant ───────────────────────────────────────────────────────────────────
 
 export const registerMerchant = async (params: {
-  merchantId?: number          // present when editing existing merchant
+  merchantId?: number
   shopName: string
   location?: string
   phoneNumber: string
@@ -188,7 +232,6 @@ export const registerMerchant = async (params: {
 }): Promise<MerchantRegisterResponse> => {
   // PATCH if updating existing merchant
   if (params.merchantId && params.merchantId > 0) {
-    // For PATCH, ONLY send updatable fields (no shop_name)
     const patchPayload: {
       phone_number?: string
       lightning_address?: string
@@ -219,6 +262,7 @@ export const registerMerchant = async (params: {
   const { data } = await api.post<MerchantRegisterResponse>('/merchant/register', payload)
   return data
 }
+
 export const updateMerchant = async (
   merchantId: number,
   data: {
@@ -228,7 +272,6 @@ export const updateMerchant = async (
     payout_mode?: PayoutMode
   }
 ): Promise<MerchantResponse> => {
-  // Filter out undefined values to only send allowed fields
   const cleanData = Object.fromEntries(
     Object.entries(data).filter(([_, v]) => v !== undefined && v !== null)
   )
@@ -252,6 +295,23 @@ export const getMerchantTransactions = async (
 
 export const getMerchantSummary = async (merchant_id: number) => {
   const { data } = await api.get(`/merchant/${merchant_id}/summary`)
+  return data
+}
+
+// ── Duplicate Check ───────────────────────────────────────────────────────────
+
+export const checkDuplicateMerchant = async (phone?: string, shopName?: string): Promise<{
+  exists: boolean
+  merchant_id?: number
+  shop_name?: string
+  phone_number?: string
+  message?: string
+}> => {
+  const params = new URLSearchParams()
+  if (phone) params.append('phone_number', phone)
+  if (shopName) params.append('shop_name', shopName)
+  
+  const { data } = await api.get(`/merchant/check-duplicate?${params}`)
   return data
 }
 
@@ -279,7 +339,6 @@ export const getWithdrawals = async (merchant_id: number) => {
 api.interceptors.response.use(
   response => response,
   (error: AxiosError) => {
-    // Attach a user-friendly error message to the error object
     const userMessage = extractErrorMessage(error)
     ;(error as any).userMessage = userMessage
     
