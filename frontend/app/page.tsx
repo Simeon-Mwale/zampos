@@ -1,4 +1,4 @@
-// app/page.tsx — ZamPOS v2.1: Direct + Custodial payout modes (Production Ready)
+// app/page.tsx — ZamPOS v2.9: Production Ready with Duplicate Prevention, 1-decimal rate & FREE Recovery Codes
 'use client'
 
 import SummaryCard from '@/components/SummaryCard'
@@ -7,7 +7,7 @@ import { getMerchantSummary, getMerchantTransactions } from '@/lib/api'
 import { useState, useEffect, useCallback, useRef } from 'react'
 import { 
   Zap, RefreshCw, ChevronRight, X, CheckCircle, Clock, 
-  Settings, Store, AlertCircle, Phone, Wallet, CheckCircle2, ArrowDownToLine, LogOut
+  Settings, Store, AlertCircle, Phone, Wallet, CheckCircle2, ArrowDownToLine, LogOut, Shield
 } from 'lucide-react'
 import { QRCodeSVG } from 'qrcode.react'
 import { 
@@ -29,7 +29,16 @@ interface SummaryData {
   total_zmw?: number
   avg_zmw?: number
   transaction_count?: number
+  custodial_balance_sats?: number
   [key: string]: any
+}
+
+interface DuplicateCheckResponse {
+  exists: boolean
+  merchant_id?: number
+  shop_name?: string
+  phone_number?: string
+  message?: string
 }
 
 // ── Validators ────────────────────────────────────────────────────────────────
@@ -42,6 +51,9 @@ function isValidLightningAddress(addr: string): boolean {
 function isValidPhone(phone: string): boolean {
   return /^\d{9,15}$/.test(phone.replace(/[\s\-\+]/g, ''))
 }
+
+// ── API Base URL ─────────────────────────────────────────────────────────────
+const API_URL = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:8000'
 
 // ── Main Component ────────────────────────────────────────────────────────────
 export default function POSPage() {
@@ -66,6 +78,14 @@ export default function POSPage() {
   const [invoiceQueued, setInvoiceQueued] = useState(false)
   const [isEditingSettings, setIsEditingSettings] = useState(false)
   const [showSwitchConfirm, setShowSwitchConfirm] = useState(false)
+  const [balanceRefreshTrigger, setBalanceRefreshTrigger] = useState(0)
+  const [checkingDuplicate, setCheckingDuplicate] = useState(false)
+
+  // Recovery state (FREE - no SMS cost)
+  const [showRecovery, setShowRecovery] = useState(false)
+  const [recoveryPhone, setRecoveryPhone] = useState('')
+  const [recoveryCode, setRecoveryCode] = useState('')
+  const [recovering, setRecovering] = useState(false)
 
   // Onboarding state
   const [shopName, setShopName] = useState('')
@@ -84,15 +104,27 @@ export default function POSPage() {
 
   const rateRef = useRef<NodeJS.Timeout | null>(null)
 
-  // ── Computed Values ─────────────────────────────────────────────────────────
-  const displayedRate = rate?.displayed_zmw_per_btc ?? rate?.zmw_per_btc ?? 0
+  // ── Computed Values — Use sats_per_zmw directly from API ────────────────────
   const zmwAmount = parseFloat(zmwInput) || 0
-  const satsAmount = displayedRate && zmwAmount > 0 
-    ? Math.max(1, Math.floor((zmwAmount / displayedRate) * 1e8)) 
+  
+  // Direct from API: sats_per_zmw (e.g., 67.9 sats per 1 ZMW)
+  const satsPerZMW = rate?.sats_per_zmw ?? 0
+  
+  // Display rate (ZMW per BTC) for UI reference
+  const displayedZMWperBTC = rate?.displayed_zmw_per_btc ?? 0
+  
+  // Calculate sats from ZMW using the direct sats_per_zmw value
+  const satsAmount = satsPerZMW && zmwAmount > 0 
+    ? Math.max(1, Math.round(zmwAmount * satsPerZMW)) 
     : 0
-  const btcDisplay = displayedRate && zmwAmount > 0 
-    ? (zmwAmount / displayedRate).toFixed(8) 
+  
+  // BTC amount for display
+  const btcDisplay = displayedZMWperBTC && zmwAmount > 0 
+    ? (zmwAmount / displayedZMWperBTC).toFixed(8) 
     : '0.00000000'
+  
+  // For display: Show 1 decimal place (e.g., 67.9 sats/ZMW)
+  const displaySatsPerZMW = satsPerZMW.toFixed(1)
 
   // ── LocalStorage Helpers ────────────────────────────────────────────────────
   const isMerchantConfigured = (): boolean => 
@@ -107,7 +139,85 @@ export default function POSPage() {
   const getCustodialBalance = (): number => 
     parseInt(localStorage.getItem('zampos-custodial-balance') || '0')
 
-  // ── Open Settings (pre-filled) ──────────────────────────────────────────────
+  // ── Duplicate Check Function ────────────────────────────────────────────────
+  const checkDuplicateMerchant = async (phone?: string, name?: string): Promise<DuplicateCheckResponse | null> => {
+    if (!phone && !name) return null
+    
+    try {
+      const params = new URLSearchParams()
+      if (phone) params.append('phone_number', phone)
+      if (name) params.append('shop_name', name)
+      
+      const response = await fetch(`${API_URL}/merchant/check-duplicate?${params}`)
+      const data = await response.json()
+      return data
+    } catch (err) {
+      console.error('Duplicate check failed:', err)
+      return null
+    }
+  }
+
+  // ── Real-time Phone Validation ─────────────────────────────────────────────
+  const handlePhoneChange = async (phone: string) => {
+    setPhoneNumber(phone)
+    setFieldErrors(prev => ({ ...prev, phoneNumber: '' }))
+    
+    if (phone.length >= 9 && isValidPhone(phone)) {
+      setCheckingDuplicate(true)
+      const result = await checkDuplicateMerchant(phone, undefined)
+      if (result?.exists) {
+        setFieldErrors(prev => ({ 
+          ...prev, 
+          phoneNumber: `⚠️ ${phone} is already registered to "${result.shop_name}"` 
+        }))
+      }
+      setCheckingDuplicate(false)
+    }
+  }
+
+  // ── Real-time Shop Name Validation ─────────────────────────────────────────
+  const handleShopNameChange = async (name: string) => {
+    setShopName(name)
+    setFieldErrors(prev => ({ ...prev, shopName: '' }))
+    
+    if (name.length >= 2) {
+      setCheckingDuplicate(true)
+      const result = await checkDuplicateMerchant(undefined, name)
+      if (result?.exists) {
+        setFieldErrors(prev => ({ 
+          ...prev, 
+          shopName: `⚠️ "${name}" is already taken` 
+        }))
+      }
+      setCheckingDuplicate(false)
+    }
+  }
+
+  // ── Refresh Custodial Balance from Server ───────────────────────────────────
+  const refreshCustodialBalance = useCallback(async () => {
+    const mode = getPayoutMode()
+    if (mode !== 'custodial') return
+    
+    const merchantId = getMerchantId()
+    if (!merchantId || merchantId === 0) return
+    
+    try {
+      const merchantSummary = await getMerchantSummary(merchantId)
+      const serverBalance = merchantSummary?.custodial_balance_sats ?? 
+                           merchantSummary?.balance ?? 
+                           merchantSummary?.custodialBalance ?? 0
+      
+      const currentLocal = getCustodialBalance()
+      if (serverBalance !== currentLocal) {
+        localStorage.setItem('zampos-custodial-balance', String(serverBalance))
+        setBalanceRefreshTrigger(prev => prev + 1)
+      }
+    } catch (err) {
+      console.error('Failed to refresh custodial balance:', err)
+    }
+  }, [])
+
+  // ── Open Settings ──────────────────────────────────────────────────────────
   const openSettings = () => {
     setShopName(localStorage.getItem('zampos-shop-name') || '')
     setPhoneNumber(localStorage.getItem('zampos-phone-number') || '')
@@ -121,7 +231,7 @@ export default function POSPage() {
     setScreen('onboarding')
   }
 
-  // ── Switch Shop (logout current merchant) ───────────────────────────────────
+  // ── Switch Shop ────────────────────────────────────────────────────────────
   const handleSwitchShop = () => {
     localStorage.removeItem('zampos-merchant-id')
     localStorage.removeItem('zampos-shop-name')
@@ -158,18 +268,37 @@ export default function POSPage() {
     }
   }, [t])
 
-  useEffect(() => {
+  const fetchMerchantData = useCallback(async () => {
     if (!isMerchantConfigured()) return
     const mid = getMerchantId()
-    Promise.all([
-      getMerchantSummary(mid),
-      getMerchantTransactions(mid, 200),
-    ]).then(([sum, txs]) => {
+    try {
+      const [sum, txs] = await Promise.all([
+        getMerchantSummary(mid),
+        getMerchantTransactions(mid, 200),
+      ])
       const summaryData = sum?.summary ?? sum ?? null
       setSummary(summaryData)
       setTransactions(txs || [])
-    }).catch(() => {})
+      
+      if (getPayoutMode() === 'custodial' && summaryData) {
+        const serverBalance = summaryData?.custodial_balance_sats ?? 
+                             summaryData?.balance ?? 
+                             summaryData?.custodialBalance ?? 0
+        const currentLocal = getCustodialBalance()
+        if (serverBalance !== currentLocal) {
+          localStorage.setItem('zampos-custodial-balance', String(serverBalance))
+          setBalanceRefreshTrigger(prev => prev + 1)
+        }
+      }
+    } catch (err) {
+      console.error('Failed to fetch merchant data:', err)
+    }
   }, [])
+
+  useEffect(() => {
+    if (!isMerchantConfigured()) return
+    fetchMerchantData()
+  }, [fetchMerchantData, balanceRefreshTrigger])
 
   useEffect(() => {
     fetchRate()
@@ -189,6 +318,16 @@ export default function POSPage() {
     }
   }, [lightningAddress])
 
+  useEffect(() => {
+    if (screen !== 'pos' || getPayoutMode() !== 'custodial') return
+    
+    const interval = setInterval(() => {
+      refreshCustodialBalance()
+    }, 30000)
+    
+    return () => clearInterval(interval)
+  }, [screen, refreshCustodialBalance])
+
   // ── Payment Polling ─────────────────────────────────────────────────────────
   useEffect(() => {
     if (screen !== 'invoice' || !invoice) return
@@ -206,10 +345,11 @@ export default function POSPage() {
     return () => { clearInterval(poll); setPaymentPolling(false) }
   }, [screen, invoice])
 
-  const _onPaymentSuccess = () => {
+  const _onPaymentSuccess = async () => {
     if (invoice && getPayoutMode() === 'custodial') {
       const cur = getCustodialBalance()
       localStorage.setItem('zampos-custodial-balance', String(cur + (invoice.amount_sats || 0)))
+      await refreshCustodialBalance()
     }
     setScreen('success')
   }
@@ -218,7 +358,6 @@ export default function POSPage() {
   const validateOnboarding = (): boolean => {
     const errs: Record<string, string> = {}
     
-    // Only validate shop_name for NEW merchants, not when editing
     const existingId = getMerchantId()
     if (!existingId || existingId === 0) {
       if (!shopName.trim() || shopName.trim().length < 2)
@@ -237,16 +376,77 @@ export default function POSPage() {
     return Object.keys(errs).length === 0
   }
 
+  // ── Account Recovery Handler (FREE - no SMS cost) ──────────────────────────
+  const handleRecoverAccount = async () => {
+    if (!recoveryPhone || !recoveryCode) {
+      setError('Please enter both phone number and recovery code')
+      return
+    }
+    
+    setRecovering(true)
+    setError('')
+    
+    try {
+      const response = await fetch(`${API_URL}/merchant/recover`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          phone_number: recoveryPhone,
+          recovery_code: recoveryCode.toUpperCase()
+        })
+      })
+      
+      const data = await response.json()
+      
+      if (response.ok && data.success) {
+        // Restore merchant data to localStorage
+        localStorage.setItem('zampos-merchant-id', data.merchant_id.toString())
+        localStorage.setItem('zampos-shop-name', data.shop_name)
+        localStorage.setItem('zampos-phone-number', data.phone_number)
+        localStorage.setItem('zampos-payout-mode', data.payout_mode)
+        localStorage.setItem('zampos-lightning-address', data.lightning_address || '')
+        localStorage.setItem('zampos-custodial-balance', data.custodial_balance_sats.toString())
+        
+        // Reset recovery state
+        setShowRecovery(false)
+        setRecoveryPhone('')
+        setRecoveryCode('')
+        
+        // Navigate to POS
+        setScreen('pos')
+        await fetchMerchantData()
+        await refreshCustodialBalance()
+      } else {
+        setError(data.detail?.message || 'Invalid recovery credentials. Please check your phone number and recovery code.')
+      }
+    } catch (err) {
+      console.error('Recovery error:', err)
+      setError('Recovery failed. Please check your connection and try again.')
+    } finally {
+      setRecovering(false)
+    }
+  }
+
   // ── Handlers ────────────────────────────────────────────────────────────────
   const handleRegister = async () => {
     if (!validateOnboarding()) return
+    
+    // Final duplicate check before registration
+    setCheckingDuplicate(true)
+    const duplicateCheck = await checkDuplicateMerchant(phoneNumber, shopName)
+    if (duplicateCheck?.exists) {
+      setError(`⚠️ Cannot register: ${duplicateCheck.message}`)
+      setCheckingDuplicate(false)
+      return
+    }
+    setCheckingDuplicate(false)
+    
     setError('')
     setRegistering(true)
     try {
       const existingId = getMerchantId()
       
       if (existingId && existingId > 0) {
-        // UPDATE existing merchant - ONLY send updatable fields
         const updateData: {
           phone_number?: string
           lightning_address?: string
@@ -263,10 +463,8 @@ export default function POSPage() {
           updateData.location = location.trim()
         }
         
-        // FIXED: Use updateMerchant (imported), not updateMerchantSettings
         await updateMerchant(existingId, updateData)
         
-        // Update localStorage
         localStorage.setItem('zampos-shop-name', shopName.trim())
         localStorage.setItem('zampos-phone-number', phoneNumber.trim())
         localStorage.setItem('zampos-payout-mode', payoutMode)
@@ -275,7 +473,6 @@ export default function POSPage() {
         }
         
       } else {
-        // NEW merchant - all fields allowed
         const result: MerchantRegisterResponse = await registerMerchant({
           shopName: shopName.trim(),
           location: location.trim() || undefined,
@@ -289,14 +486,27 @@ export default function POSPage() {
         localStorage.setItem('zampos-phone-number', result.phone_number)
         localStorage.setItem('zampos-lightning-address', result.lightning_address || '')
         localStorage.setItem('zampos-custodial-balance', '0')
+        
+        // Show recovery code to merchant (show once!)
+        if (result.recovery_code) {
+          alert(`⚠️ IMPORTANT: Save this recovery code!\n\n${result.recovery_code}\n\nYou will need this code to recover your account if you lose your phone.\n\nThis code will only be shown once!`)
+        }
       }
       
       setIsEditingSettings(false)
       setScreen('pos')
       fetchRate(true)
+      await fetchMerchantData()
     } catch (err: any) {
       console.error('Update error:', err)
-      setError(err?.userMessage || err?.response?.data?.detail || 'Registration failed')
+      // Handle duplicate error from backend
+      if (err?.response?.data?.detail?.error === 'PHONE_EXISTS' || 
+          err?.response?.data?.detail?.error === 'SHOP_NAME_EXISTS' ||
+          err?.response?.status === 409) {
+        setError('⚠️ This phone number or shop name is already registered. Please use different credentials.')
+      } else {
+        setError(err?.userMessage || err?.response?.data?.detail || 'Registration failed')
+      }
     } finally {
       setRegistering(false)
     }
@@ -338,8 +548,11 @@ export default function POSPage() {
     setConfirming(true)
     try {
       const r = await confirmPaid(invoice.payment_hash)
-      if (r.success) _onPaymentSuccess()
-      else setError('Could not confirm. Try again.')
+      if (r.success) {
+        await _onPaymentSuccess()
+      } else {
+        setError('Could not confirm. Try again.')
+      }
     } catch { 
       setError('Confirmation failed. Try again.') 
     } finally {
@@ -359,6 +572,8 @@ export default function POSPage() {
       const r = await requestWithdrawal(getMerchantId(), withdrawAddress)
       localStorage.setItem('zampos-custodial-balance', '0')
       setWithdrawResult(r.message)
+      await refreshCustodialBalance()
+      await fetchMerchantData()
     } catch (err: any) {
       setError(err?.userMessage || err?.response?.data?.detail || 'Withdrawal request failed')
     } finally {
@@ -374,6 +589,7 @@ export default function POSPage() {
     setRateWarning(null)
     setInvoiceQueued(false)
     setScreen('pos')
+    refreshCustodialBalance()
   }
 
   // ── Formatters ──────────────────────────────────────────────────────────────
@@ -386,7 +602,7 @@ export default function POSPage() {
     `w-full bg-surface border rounded-xl px-4 py-3 text-text font-body outline-none transition-colors placeholder:text-muted
      ${err ? 'border-red-400' : 'border-border focus:border-bitcoin'}`
 
-  // ── ONBOARDING / SETTINGS SCREEN ────────────────────────────────────────────
+  // ── ONBOARDING / SETTINGS / RECOVERY SCREEN ─────────────────────────────────
   if (screen === 'onboarding') return (
     <main className="min-h-screen bg-surface flex flex-col">
       <header className="border-b border-border px-6 py-4 flex items-center justify-between">
@@ -405,158 +621,225 @@ export default function POSPage() {
         <div className="w-full max-w-sm space-y-5">
           <div className="text-center space-y-2">
             <div className="inline-flex items-center justify-center w-16 h-16 rounded-2xl bg-bitcoin/10 mb-2">
-              {isEditingSettings ? <Settings size={28} className="text-bitcoin" /> : <Store size={28} className="text-bitcoin" />}
+              {isEditingSettings ? <Settings size={28} className="text-bitcoin" /> : showRecovery ? <Shield size={28} className="text-bitcoin" /> : <Store size={28} className="text-bitcoin" />}
             </div>
             <h1 className="font-display font-bold text-2xl text-text">
-              {isEditingSettings ? '⚙️ Shop Settings' : 'Welcome to ZamPOS ⚡'}
+              {isEditingSettings ? '⚙️ Shop Settings' : showRecovery ? '🔐 Account Recovery' : 'Welcome to ZamPOS ⚡'}
             </h1>
             <p className="text-text-dim font-body text-sm">
               {isEditingSettings 
                 ? 'Update your shop details or switch payment mode.'
-                : 'Set up your shop to start accepting Bitcoin Lightning payments.'}
+                : showRecovery 
+                  ? 'Enter your phone number and recovery code to restore access (FREE - no SMS required)'
+                  : 'Set up your shop to start accepting Bitcoin Lightning payments.'}
             </p>
           </div>
 
           <div className="bg-panel border border-border rounded-2xl p-5 space-y-4">
-            {/* Shop Name - disabled when editing settings */}
-            <div className="space-y-1">
-              <label className="text-text-dim text-xs font-mono uppercase tracking-widest flex items-center gap-1">
-                <Store size={11} /> Shop Name <span className="text-bitcoin ml-0.5">*</span>
-              </label>
-              <input 
-                type="text" 
-                value={shopName} 
-                disabled={isEditingSettings}
-                maxLength={100}
-                onChange={e => { setShopName(e.target.value); setFieldErrors(p => ({...p, shopName: ''})) }}
-                placeholder="e.g., Mama Ntemba's Groundnuts"
-                className={`${inputClass(fieldErrors.shopName)} ${isEditingSettings ? 'bg-surface/50 text-text-dim cursor-not-allowed' : ''}`} 
-              />
-              {fieldErrors.shopName && <p className="text-red-400 text-xs font-mono">{fieldErrors.shopName}</p>}
-              {isEditingSettings && (
-                <p className="text-amber-400/80 text-xs font-mono flex items-center gap-1 mt-1">
-                  <AlertCircle size={10} /> Shop name cannot be changed after creation
-                </p>
-              )}
-            </div>
+            
+            {/* RECOVERY MODE */}
+            {showRecovery ? (
+              <>
+                <div className="space-y-1">
+                  <label className="text-text-dim text-xs font-mono uppercase tracking-widest flex items-center gap-1">
+                    <Phone size={11} /> Phone Number
+                  </label>
+                  <input type="tel" value={recoveryPhone} maxLength={20}
+                    onChange={e => setRecoveryPhone(e.target.value)}
+                    placeholder="0971234567 or +260971234567"
+                    className={inputClass()} />
+                  <p className="text-muted text-xs font-mono">📱 The phone number you registered with</p>
+                </div>
 
-            {/* Location */}
-            <div className="space-y-1">
-              <label className="text-text-dim text-xs font-mono uppercase tracking-widest">
-                Location <span className="text-muted">(optional)</span>
-              </label>
-              <input type="text" value={location} maxLength={200}
-                onChange={e => setLocation(e.target.value)}
-                placeholder="e.g., Soweto Market, Lusaka"
-                className={inputClass()} />
-            </div>
+                <div className="space-y-1">
+                  <label className="text-text-dim text-xs font-mono uppercase tracking-widest flex items-center gap-1">
+                    <Shield size={11} /> Recovery Code
+                  </label>
+                  <input type="text" value={recoveryCode} maxLength={16}
+                    onChange={e => setRecoveryCode(e.target.value.toUpperCase())}
+                    placeholder="e.g., 1A2B3C4D5E6F7G8H"
+                    className={`${inputClass()} font-mono text-sm`} />
+                  <p className="text-muted text-xs font-mono">🔑 The 16-character code you saved during registration</p>
+                </div>
 
-            {/* Phone */}
-            <div className="space-y-1">
-              <label className="text-text-dim text-xs font-mono uppercase tracking-widest flex items-center gap-1">
-                <Phone size={11} /> Phone Number <span className="text-bitcoin ml-0.5">*</span>
-              </label>
-              <input type="tel" value={phoneNumber} maxLength={20}
-                onChange={e => { setPhoneNumber(e.target.value); setFieldErrors(p => ({...p, phoneNumber: ''})) }}
-                placeholder="0971234567 or +260971234567"
-                className={inputClass(fieldErrors.phoneNumber)} />
-              {fieldErrors.phoneNumber
-                ? <p className="text-red-400 text-xs font-mono">{fieldErrors.phoneNumber}</p>
-                : <p className="text-muted text-xs font-mono">📱 Get an SMS every time you receive a payment</p>}
-            </div>
+                {error && <p className="text-red-400 text-sm font-mono text-center bg-red-400/10 rounded-lg p-3">{error}</p>}
 
-            {/* Payout Mode */}
-            <div className="space-y-2">
-              <label className="text-text-dim text-xs font-mono uppercase tracking-widest">How do you want to receive payments?</label>
-              <div className="grid grid-cols-2 gap-2">
-                {(['direct', 'custodial'] as PayoutMode[]).map(mode => (
-                  <button key={mode} onClick={() => setPayoutMode(mode)}
-                    className={`rounded-xl border-2 p-3 text-left transition-all
-                      ${payoutMode === mode ? 'border-bitcoin bg-bitcoin/10' : 'border-border hover:border-bitcoin/40'}`}>
-                    <p className={`font-mono text-xs font-bold uppercase ${payoutMode === mode ? 'text-bitcoin' : 'text-text-dim'}`}>
-                      {mode === 'direct' ? '⚡ Direct' : '🏦 Sweep'}
+                <button onClick={handleRecoverAccount} disabled={recovering}
+                  className="w-full bg-bitcoin hover:bg-bitcoin-dark disabled:opacity-40 text-surface font-display font-bold text-lg rounded-2xl py-4 flex items-center justify-center gap-2 transition-all active:scale-95">
+                  {recovering ? <><RefreshCw size={18} className="animate-spin" /> Recovering...</> : <><Shield size={18} /> Recover Account</>}
+                </button>
+
+                <button onClick={() => { setShowRecovery(false); setError(''); setRecoveryPhone(''); setRecoveryCode(''); }}
+                  className="w-full text-bitcoin font-mono text-sm py-2 hover:underline">
+                  ← Back to Registration
+                </button>
+              </>
+            ) : (
+              <>
+                {/* REGISTRATION FORM (existing code) */}
+                {/* Shop Name */}
+                <div className="space-y-1">
+                  <label className="text-text-dim text-xs font-mono uppercase tracking-widest flex items-center gap-1">
+                    <Store size={11} /> Shop Name <span className="text-bitcoin ml-0.5">*</span>
+                  </label>
+                  <div className="relative">
+                    <input 
+                      type="text" 
+                      value={shopName} 
+                      disabled={isEditingSettings}
+                      maxLength={100}
+                      onChange={e => handleShopNameChange(e.target.value)}
+                      placeholder="e.g., Mama Ntemba's Groundnuts"
+                      className={`${inputClass(fieldErrors.shopName)} ${isEditingSettings ? 'bg-surface/50 text-text-dim cursor-not-allowed' : ''}`} 
+                    />
+                    {checkingDuplicate && shopName.length >= 2 && (
+                      <div className="absolute right-3 top-1/2 -translate-y-1/2">
+                        <RefreshCw size={14} className="animate-spin text-muted" />
+                      </div>
+                    )}
+                  </div>
+                  {fieldErrors.shopName && <p className="text-red-400 text-xs font-mono">{fieldErrors.shopName}</p>}
+                  {isEditingSettings && (
+                    <p className="text-amber-400/80 text-xs font-mono flex items-center gap-1 mt-1">
+                      <AlertCircle size={10} /> Shop name cannot be changed after creation
                     </p>
-                    <p className="text-muted text-xs mt-1 font-body">
-                      {mode === 'direct' ? 'Instant to your wallet' : 'Accumulate & withdraw when ready'}
-                    </p>
-                  </button>
-                ))}
-              </div>
-            </div>
-
-            {/* Lightning Address (direct only) */}
-            {payoutMode === 'direct' && (
-              <div className="space-y-1">
-                <label className="text-text-dim text-xs font-mono uppercase tracking-widest flex items-center gap-1">
-                  <Wallet size={11} /> Lightning Address <span className="text-bitcoin ml-0.5">*</span>
-                </label>
-                <div className="relative">
-                  <input type="email" value={lightningAddress} maxLength={200}
-                    autoComplete="off" autoCapitalize="none" spellCheck={false}
-                    onChange={e => { setLightningAddress(e.target.value); setFieldErrors(p => ({...p, lightningAddress: ''})) }}
-                    placeholder="you@walletofsatoshi.com"
-                    className={`${inputClass(fieldErrors.lightningAddress)} font-mono text-sm`} />
-                  {walletDomain && !fieldErrors.lightningAddress && (
-                    <div className="absolute right-3 top-1/2 -translate-y-1/2">
-                      <CheckCircle2 size={16} className="text-bitcoin" />
-                    </div>
                   )}
                 </div>
-                {fieldErrors.lightningAddress
-                  ? <p className="text-red-400 text-xs font-mono">{fieldErrors.lightningAddress}</p>
-                  : walletDomain
-                    ? <p className="text-bitcoin text-xs font-mono">✅ {walletDomain} wallet detected</p>
-                    : <p className="text-muted text-xs font-mono">⚡ Works with Wallet of Satoshi, Phoenix, Blink, Speed &amp; more</p>}
-              </div>
-            )}
 
-            {payoutMode === 'custodial' && (
-              <div className="bg-bitcoin/5 border border-bitcoin/20 rounded-xl p-3">
-                <p className="text-bitcoin text-xs font-mono">
-                  🏦 Your sats accumulate safely. Use "End Day &amp; Withdraw" anytime to send to your wallet.
-                </p>
-              </div>
-            )}
+                {/* Location */}
+                <div className="space-y-1">
+                  <label className="text-text-dim text-xs font-mono uppercase tracking-widest">
+                    Location <span className="text-muted">(optional)</span>
+                  </label>
+                  <input type="text" value={location} maxLength={200}
+                    onChange={e => setLocation(e.target.value)}
+                    placeholder="e.g., Soweto Market, Lusaka"
+                    className={inputClass()} />
+                </div>
 
-            {error && <p className="text-red-400 text-sm font-mono text-center bg-red-400/10 rounded-lg p-3">{error}</p>}
-
-            <button onClick={handleRegister}
-              disabled={registering || (!isEditingSettings && (!shopName.trim() || !phoneNumber.trim()))}
-              className="w-full bg-bitcoin hover:bg-bitcoin-dark disabled:opacity-40 disabled:cursor-not-allowed
-                         text-surface font-display font-bold text-lg rounded-2xl py-4
-                         flex items-center justify-center gap-2 transition-all active:scale-95">
-              {registering
-                ? <><RefreshCw size={18} className="animate-spin" /> Saving...</>
-                : isEditingSettings
-                  ? <><Settings size={18} /> Save Changes</>
-                  : <><Zap size={18} fill="currentColor" /> Start Selling ⚡</>}
-            </button>
-
-            {/* ── Switch Shop button — only shown in settings ── */}
-            {isEditingSettings && (
-              <>
-                {showSwitchConfirm ? (
-                  <div className="bg-red-400/10 border border-red-400/30 rounded-xl p-4 space-y-3">
-                    <p className="text-red-400 text-xs font-mono text-center">
-                      ⚠️ This will log out <strong>{localStorage.getItem('zampos-shop-name')}</strong> from this device. Are you sure?
-                    </p>
-                    <div className="grid grid-cols-2 gap-2">
-                      <button onClick={() => setShowSwitchConfirm(false)}
-                        className="border border-border text-text-dim font-mono text-sm rounded-xl py-2 hover:border-bitcoin/40">
-                        Cancel
-                      </button>
-                      <button onClick={handleSwitchShop}
-                        className="bg-red-500 text-white font-mono text-sm rounded-xl py-2 hover:bg-red-600 active:scale-95">
-                        Yes, Switch
-                      </button>
-                    </div>
+                {/* Phone */}
+                <div className="space-y-1">
+                  <label className="text-text-dim text-xs font-mono uppercase tracking-widest flex items-center gap-1">
+                    <Phone size={11} /> Phone Number <span className="text-bitcoin ml-0.5">*</span>
+                  </label>
+                  <div className="relative">
+                    <input type="tel" value={phoneNumber} maxLength={20}
+                      onChange={e => handlePhoneChange(e.target.value)}
+                      placeholder="0971234567 or +260971234567"
+                      className={inputClass(fieldErrors.phoneNumber)} />
+                    {checkingDuplicate && phoneNumber.length >= 9 && (
+                      <div className="absolute right-3 top-1/2 -translate-y-1/2">
+                        <RefreshCw size={14} className="animate-spin text-muted" />
+                      </div>
+                    )}
                   </div>
-                ) : (
-                  <button onClick={() => setShowSwitchConfirm(true)}
-                    className="w-full flex items-center justify-center gap-2 text-text-dim hover:text-red-400
-                               font-mono text-xs py-2 transition-colors">
-                    <LogOut size={13} /> Switch to a different shop
+                  {fieldErrors.phoneNumber
+                    ? <p className="text-red-400 text-xs font-mono">{fieldErrors.phoneNumber}</p>
+                    : <p className="text-muted text-xs font-mono">📱 Get an SMS every time you receive a payment</p>}
+                </div>
+
+                {/* Payout Mode */}
+                <div className="space-y-2">
+                  <label className="text-text-dim text-xs font-mono uppercase tracking-widest">How do you want to receive payments?</label>
+                  <div className="grid grid-cols-2 gap-2">
+                    {(['direct', 'custodial'] as PayoutMode[]).map(mode => (
+                      <button key={mode} onClick={() => setPayoutMode(mode)}
+                        className={`rounded-xl border-2 p-3 text-left transition-all
+                          ${payoutMode === mode ? 'border-bitcoin bg-bitcoin/10' : 'border-border hover:border-bitcoin/40'}`}>
+                        <p className={`font-mono text-xs font-bold uppercase ${payoutMode === mode ? 'text-bitcoin' : 'text-text-dim'}`}>
+                          {mode === 'direct' ? '⚡ Direct' : '🏦 Sweep'}
+                        </p>
+                        <p className="text-muted text-xs mt-1 font-body">
+                          {mode === 'direct' ? 'Instant to your wallet' : 'Accumulate & withdraw when ready'}
+                        </p>
+                      </button>
+                    ))}
+                  </div>
+                </div>
+
+                {/* Lightning Address (direct only) */}
+                {payoutMode === 'direct' && (
+                  <div className="space-y-1">
+                    <label className="text-text-dim text-xs font-mono uppercase tracking-widest flex items-center gap-1">
+                      <Wallet size={11} /> Lightning Address <span className="text-bitcoin ml-0.5">*</span>
+                    </label>
+                    <div className="relative">
+                      <input type="email" value={lightningAddress} maxLength={200}
+                        autoComplete="off" autoCapitalize="none" spellCheck={false}
+                        onChange={e => { setLightningAddress(e.target.value); setFieldErrors(p => ({...p, lightningAddress: ''})) }}
+                        placeholder="you@walletofsatoshi.com"
+                        className={`${inputClass(fieldErrors.lightningAddress)} font-mono text-sm`} />
+                      {walletDomain && !fieldErrors.lightningAddress && (
+                        <div className="absolute right-3 top-1/2 -translate-y-1/2">
+                          <CheckCircle2 size={16} className="text-bitcoin" />
+                        </div>
+                      )}
+                    </div>
+                    {fieldErrors.lightningAddress
+                      ? <p className="text-red-400 text-xs font-mono">{fieldErrors.lightningAddress}</p>
+                      : walletDomain
+                        ? <p className="text-bitcoin text-xs font-mono">✅ {walletDomain} wallet detected</p>
+                        : <p className="text-muted text-xs font-mono">⚡ Works with Wallet of Satoshi, Phoenix, Blink, Speed &amp; more</p>}
+                  </div>
+                )}
+
+                {payoutMode === 'custodial' && (
+                  <div className="bg-bitcoin/5 border border-bitcoin/20 rounded-xl p-3">
+                    <p className="text-bitcoin text-xs font-mono">
+                      🏦 Your sats accumulate safely. Use "End Day &amp; Withdraw" anytime to send to your wallet.
+                    </p>
+                  </div>
+                )}
+
+                {error && <p className="text-red-400 text-sm font-mono text-center bg-red-400/10 rounded-lg p-3">{error}</p>}
+
+                <button onClick={handleRegister}
+                  disabled={registering || checkingDuplicate || (!isEditingSettings && (!shopName.trim() || !phoneNumber.trim()))}
+                  className="w-full bg-bitcoin hover:bg-bitcoin-dark disabled:opacity-40 disabled:cursor-not-allowed
+                             text-surface font-display font-bold text-lg rounded-2xl py-4
+                             flex items-center justify-center gap-2 transition-all active:scale-95">
+                  {registering || checkingDuplicate
+                    ? <><RefreshCw size={18} className="animate-spin" /> {checkingDuplicate ? 'Checking...' : 'Saving...'}</>
+                    : isEditingSettings
+                      ? <><Settings size={18} /> Save Changes</>
+                      : <><Zap size={18} fill="currentColor" /> Start Selling ⚡</>}
+                </button>
+
+                {/* Recovery Link - FREE account recovery */}
+                {!isEditingSettings && (
+                  <button onClick={() => setShowRecovery(true)}
+                    className="w-full flex items-center justify-center gap-2 text-bitcoin font-mono text-sm py-2 hover:underline transition-colors">
+                    <Shield size={13} /> Lost access? Recover your account (FREE)
                   </button>
+                )}
+
+                {/* Switch Shop button — only shown in settings */}
+                {isEditingSettings && (
+                  <>
+                    {showSwitchConfirm ? (
+                      <div className="bg-red-400/10 border border-red-400/30 rounded-xl p-4 space-y-3">
+                        <p className="text-red-400 text-xs font-mono text-center">
+                          ⚠️ This will log out <strong>{localStorage.getItem('zampos-shop-name')}</strong> from this device. Are you sure?
+                        </p>
+                        <div className="grid grid-cols-2 gap-2">
+                          <button onClick={() => setShowSwitchConfirm(false)}
+                            className="border border-border text-text-dim font-mono text-sm rounded-xl py-2 hover:border-bitcoin/40">
+                            Cancel
+                          </button>
+                          <button onClick={handleSwitchShop}
+                            className="bg-red-500 text-white font-mono text-sm rounded-xl py-2 hover:bg-red-600 active:scale-95">
+                            Yes, Switch
+                          </button>
+                        </div>
+                      </div>
+                    ) : (
+                      <button onClick={() => setShowSwitchConfirm(true)}
+                        className="w-full flex items-center justify-center gap-2 text-text-dim hover:text-red-400
+                                   font-mono text-xs py-2 transition-colors">
+                        <LogOut size={13} /> Switch to a different shop
+                      </button>
+                    )}
+                  </>
                 )}
               </>
             )}
@@ -567,7 +850,7 @@ export default function POSPage() {
     </main>
   )
 
-  // ── WITHDRAW SCREEN ─────────────────────────────────────────────────────────
+  // ── WITHDRAW SCREEN (unchanged) ─────────────────────────────────────────────
   if (screen === 'withdraw') return (
     <main className="min-h-screen bg-surface flex flex-col">
       <header className="border-b border-border px-6 py-4 flex items-center justify-between">
@@ -588,7 +871,7 @@ export default function POSPage() {
             <div className="bg-bitcoin/10 border border-bitcoin/20 rounded-2xl p-5 text-center space-y-3">
               <CheckCircle size={40} className="text-bitcoin mx-auto" fill="#F7931A" />
               <p className="text-text font-mono text-sm">{withdrawResult}</p>
-              <button onClick={() => { setWithdrawResult(null); setWithdrawAddress(''); setScreen('pos') }}
+              <button onClick={() => { setWithdrawResult(null); setWithdrawAddress(''); setScreen('pos'); refreshCustodialBalance(); }}
                 className="w-full bg-bitcoin text-surface font-display font-bold rounded-2xl py-3 active:scale-95">
                 Done
               </button>
@@ -623,7 +906,7 @@ export default function POSPage() {
     </main>
   )
 
-  // ── POS / INVOICE / SUCCESS SCREENS ─────────────────────────────────────────
+  // ── POS / INVOICE / SUCCESS SCREENS (unchanged) ─────────────────────────────
   return (
     <main className="min-h-screen bg-surface flex flex-col">
       <header className="border-b border-border px-6 py-4 flex items-center justify-between">
@@ -634,15 +917,23 @@ export default function POSPage() {
         <div className="flex items-center gap-3 text-text-dim text-sm font-mono">
           {rateLoading
             ? <RefreshCw size={12} className="animate-spin text-bitcoin" />
-            : displayedRate > 0
-              ? <><span className="text-bitcoin">₿</span><span>{fmtNum(displayedRate)} ZMW</span>
-                  {rate?.source === 'fallback' && <AlertCircle size={12} className="text-amber-400" />}</>
+            : satsPerZMW > 0
+              ? <>
+                  <Zap size={10} className="text-bitcoin" />
+                  <span>{displaySatsPerZMW} sats/ZMW</span>
+                  {rate?.source === 'fallback' && <AlertCircle size={12} className="text-amber-400" />}
+                </>
               : <span className="text-muted text-xs">Rate unavailable</span>}
           <button onClick={() => fetchRate(true)} disabled={rateLoading} className="text-muted hover:text-bitcoin">
             <RefreshCw size={12} className={rateLoading ? 'animate-spin' : ''} />
           </button>
           {savedMode === 'custodial' && (
-            <button onClick={() => { setError(''); setWithdrawResult(null); setScreen('withdraw') }}
+            <button onClick={async () => { 
+              setError(''); 
+              setWithdrawResult(null); 
+              await refreshCustodialBalance();
+              setScreen('withdraw'); 
+            }}
               className="text-bitcoin font-mono text-xs hover:underline flex items-center gap-1">
               <ArrowDownToLine size={12} /> {custBalance.toLocaleString()} sats
             </button>
@@ -666,9 +957,11 @@ export default function POSPage() {
       {screen === 'pos' && (
         <div className="flex-1 flex flex-col items-center justify-center px-6 py-8 animate-fade-in">
           <div className="w-full max-w-sm space-y-5">
-
             {savedMode === 'custodial' && custBalance > 0 && (
-              <button onClick={() => setScreen('withdraw')}
+              <button onClick={async () => { 
+                await refreshCustodialBalance();
+                setScreen('withdraw'); 
+              }}
                 className="w-full bg-bitcoin/10 border border-bitcoin/30 rounded-2xl p-4
                            flex items-center justify-between text-left hover:bg-bitcoin/20 transition-colors">
                 <div>
@@ -706,7 +999,7 @@ export default function POSPage() {
                 <span className="font-mono text-sm text-bitcoin">
                   {satsAmount > 0 ? satsAmount.toLocaleString() : '—'} {t.sats}
                 </span>
-                {displayedRate > 0 && <span className="font-mono text-xs text-text-dim ml-2">≈ {btcDisplay} ₿</span>}
+                {displayedZMWperBTC > 0 && <span className="font-mono text-xs text-text-dim ml-2">≈ {btcDisplay} ₿</span>}
               </div>
             </div>
 
@@ -851,7 +1144,12 @@ export default function POSPage() {
             </div>
 
             {invoice.payout_mode === 'custodial' && (
-              <button onClick={() => { setError(''); setWithdrawResult(null); setScreen('withdraw') }}
+              <button onClick={async () => { 
+                setError(''); 
+                setWithdrawResult(null); 
+                await refreshCustodialBalance();
+                setScreen('withdraw'); 
+              }}
                 className="w-full border-2 border-bitcoin text-bitcoin font-display font-bold text-base
                            rounded-2xl py-4 flex items-center justify-center gap-2 transition-all active:scale-95">
                 <ArrowDownToLine size={18} /> End Day &amp; Withdraw
