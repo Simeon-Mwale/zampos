@@ -1,4 +1,4 @@
-# backend/services/rate_service.py
+# backend/services/rate_service.py - Improved with better rate limiting handling
 import httpx
 import os
 import time
@@ -6,14 +6,16 @@ import logging
 import asyncio
 from decimal import Decimal
 from typing import Tuple, Optional
+import xml.etree.ElementTree as ET
 
 logger = logging.getLogger(__name__)
 
 # ─────────────────────────────────────────────
 # CONFIGURATION
 # ─────────────────────────────────────────────
-CACHE_TTL = int(os.getenv("RATE_CACHE_TTL_SECONDS", "90"))  # Increased from 45 to 90s
-REQUEST_DELAY = float(os.getenv("RATE_REQUEST_DELAY_SECONDS", "2.0"))  # Throttle requests
+CACHE_TTL = int(os.getenv("RATE_CACHE_TTL_SECONDS", "180"))  # Increased to 3 minutes
+REQUEST_DELAY = float(os.getenv("RATE_REQUEST_DELAY_SECONDS", "3.0"))  # Throttle more
+MAX_RETRIES = 2
 
 _cache = {
     "zmw_per_btc": None,
@@ -23,26 +25,14 @@ _cache = {
 }
 
 _last_request_time = 0
+_rate_limit_backoff = 1  # Start with 1 second backoff
 
 # ─────────────────────────────────────────────
-# OFFLINE SAFE FALLBACK RATE (UPDATED)
-# Used only when ALL live sources fail
-# Changed from 1,900,000 to realistic market rate
+# REALISTIC MARKET RATE FOR APRIL 2026
+# 1 BTC ≈ 1,470,000 ZMW → ~68 sats/ZMW
 # ─────────────────────────────────────────────
-FALLBACK_ZMW_PER_BTC = Decimal("1350000")  # UPDATED: Realistic market rate for April 2026
-
-# FX fallback used when all FX APIs are unreachable  
-FALLBACK_ZMW_PER_USD = Decimal("27.5")  # Updated to current rate
-
-
-def _throttle_requests():
-    """Prevent API rate limiting by spacing out requests"""
-    global _last_request_time
-    now = time.time()
-    elapsed = now - _last_request_time
-    if elapsed < REQUEST_DELAY:
-        time.sleep(REQUEST_DELAY - elapsed)
-    _last_request_time = time.time()
+FALLBACK_ZMW_PER_BTC = Decimal("1470000")  # More realistic fallback
+FALLBACK_ZMW_PER_USD = Decimal("28.0")     # Current ZMW/USD rate
 
 
 def get_cache_metadata() -> dict:
@@ -57,14 +47,11 @@ def get_cache_metadata() -> dict:
 
 async def fetch_live_rates(force_refresh: bool = False) -> Tuple[Decimal, Decimal]:
     """Fetch current BTC/ZMW rate with improved caching and fallback"""
+    global _rate_limit_backoff
     now = time.time()
 
     # ── Cache hit (longer TTL to avoid rate limits) ──
-    if (
-        not force_refresh
-        and _cache["zmw_per_btc"]
-        and (now - _cache["timestamp"]) < CACHE_TTL
-    ):
+    if not force_refresh and _cache["zmw_per_btc"] and (now - _cache["timestamp"]) < CACHE_TTL:
         logger.debug(f"📦 Using cached rate (age: {int(now - _cache['timestamp'])}s)")
         return _cache["zmw_per_btc"], _cache["sats_per_zmw"]
 
@@ -73,51 +60,67 @@ async def fetch_live_rates(force_refresh: bool = False) -> Tuple[Decimal, Decima
     errors = []
 
     # ─────────────────────────────────────────
-    # SOURCE 1: CoinGecko BTC/USD with rate limit protection
+    # SOURCE 1: CoinGecko BTC/USD (with exponential backoff)
     # ─────────────────────────────────────────
     try:
-        _throttle_requests()  # Prevent hammering APIs
-        btc_usd = await _fetch_btc_usd_with_retry()
-
-        # ─────────────────────────────────────
-        # SOURCE 2: Live ZMW/USD FX rate
-        # ─────────────────────────────────────
+        await _throttle_requests()
+        btc_usd = await _fetch_btc_usd_with_backoff()
+        
+        # Get ZMW/USD rate
         try:
             zmw_usd, fx_source = await _fetch_zmw_usd_with_retry()
             source = f"coingecko+{fx_source}"
             logger.debug(f"📈 Live FX rate: 1 USD = {zmw_usd} ZMW (via {fx_source})")
         except Exception as fx_err:
-            logger.warning(f"⚠️  All FX sources failed, using fallback: {fx_err}")
+            logger.warning(f"⚠️ FX sources failed, using fallback: {fx_err}")
             zmw_usd = float(FALLBACK_ZMW_PER_USD)
             source = "coingecko+fx-fallback"
             errors.append(f"FX: {fx_err}")
 
         zmw_per_btc = Decimal(str(btc_usd)) * Decimal(str(zmw_usd))
+        
+        # Reset backoff on success
+        _rate_limit_backoff = 1
 
     except Exception as e:
         logger.warning(f"❌ BTC price fetch failed: {e}")
         errors.append(f"BTC: {e}")
 
     # ─────────────────────────────────────────
-    # SOURCE 3: Try alternative crypto API if CoinGecko fails
+    # SOURCE 2: Alternative crypto API (CoinCap - no rate limits)
     # ─────────────────────────────────────────
     if not zmw_per_btc:
         try:
-            _throttle_requests()
-            btc_usd = await _fetch_btc_usd_alternative()
+            await _throttle_requests()
+            btc_usd = await _fetch_btc_usd_coincap()
             zmw_usd = float(FALLBACK_ZMW_PER_USD)
             zmw_per_btc = Decimal(str(btc_usd)) * Decimal(str(zmw_usd))
-            source = "alternative-api+fx-fallback"
-            logger.info(f"✅ Using alternative BTC API: {btc_usd} USD/BTC")
+            source = "coincap+fx-fallback"
+            logger.info(f"✅ Using CoinCap API: {btc_usd} USD/BTC")
         except Exception as e:
-            logger.warning(f"❌ Alternative BTC API also failed: {e}")
-            errors.append(f"Alt-BTC: {e}")
+            logger.warning(f"❌ CoinCap API failed: {e}")
+            errors.append(f"CoinCap: {e}")
+
+    # ─────────────────────────────────────────
+    # SOURCE 3: Try Binance as last resort
+    # ─────────────────────────────────────────
+    if not zmw_per_btc:
+        try:
+            await _throttle_requests()
+            btc_usd = await _fetch_btc_usd_binance()
+            zmw_usd = float(FALLBACK_ZMW_PER_USD)
+            zmw_per_btc = Decimal(str(btc_usd)) * Decimal(str(zmw_usd))
+            source = "binance+fx-fallback"
+            logger.info(f"✅ Using Binance API: {btc_usd} USD/BTC")
+        except Exception as e:
+            logger.warning(f"❌ Binance API failed: {e}")
+            errors.append(f"Binance: {e}")
 
     # ─────────────────────────────────────────
     # FINAL FALLBACK (all sources failed)
     # ─────────────────────────────────────────
     if not zmw_per_btc:
-        logger.error(f"🚨 All rate sources failed ({', '.join(errors)}) — using updated static fallback")
+        logger.error(f"🚨 All rate sources failed ({', '.join(errors)}) — using static fallback")
         zmw_per_btc = FALLBACK_ZMW_PER_BTC
         source = "static-fallback"
 
@@ -130,27 +133,34 @@ async def fetch_live_rates(force_refresh: bool = False) -> Tuple[Decimal, Decima
         "source": source,
     })
 
-    logger.info(f"💱 Rate updated | {zmw_per_btc:,.2f} ZMW/BTC | {source}")
+    logger.info(f"💱 Rate updated | {zmw_per_btc:,.2f} ZMW/BTC | {source} | ≈ {float(sats_per_zmw):.2f} sats/ZMW")
 
     return zmw_per_btc, sats_per_zmw
 
 
-# ─────────────────────────────────────────────
-# FETCH BTC/USD — CoinGecko with retry
-# ─────────────────────────────────────────────
-async def _fetch_btc_usd_with_retry(retries: int = 2) -> float:
-    """Fetch BTC/USD from CoinGecko with retry logic"""
-    for attempt in range(retries + 1):
+async def _throttle_requests():
+    """Prevent API rate limiting by spacing out requests"""
+    global _last_request_time
+    now = time.time()
+    elapsed = now - _last_request_time
+    if elapsed < REQUEST_DELAY:
+        await asyncio.sleep(REQUEST_DELAY - elapsed)
+    _last_request_time = time.time()
+
+
+async def _fetch_btc_usd_with_backoff() -> float:
+    """Fetch BTC/USD with exponential backoff for rate limits"""
+    for attempt in range(MAX_RETRIES + 1):
         try:
-            async with httpx.AsyncClient(timeout=8) as client:
+            async with httpx.AsyncClient(timeout=10) as client:
                 r = await client.get(
                     "https://api.coingecko.com/api/v3/simple/price",
                     params={"ids": "bitcoin", "vs_currencies": "usd"},
                 )
                 
                 if r.status_code == 429:
-                    wait_time = (attempt + 1) * 3
-                    logger.warning(f"⚠️  Rate limited (429), waiting {wait_time}s...")
+                    wait_time = (attempt + 1) * 5  # 5, 10, 15 seconds
+                    logger.warning(f"⚠️ Rate limited (429), waiting {wait_time}s...")
                     await asyncio.sleep(wait_time)
                     continue
                     
@@ -162,37 +172,35 @@ async def _fetch_btc_usd_with_retry(retries: int = 2) -> float:
                     return price
                     
         except Exception as e:
-            if attempt == retries:
+            if attempt == MAX_RETRIES:
                 raise
-            logger.debug(f"Retry {attempt + 1}/{retries} after error: {e}")
-            await asyncio.sleep(2)
+            logger.debug(f"Retry {attempt + 1}/{MAX_RETRIES} after error: {e}")
+            await asyncio.sleep(2 ** attempt)  # Exponential backoff
     
     raise ValueError("Failed to fetch BTC/USD after retries")
 
 
-# ─────────────────────────────────────────────
-# FETCH BTC/USD — Alternative API (Binance)
-# ─────────────────────────────────────────────
-async def _fetch_btc_usd_alternative() -> float:
-    """Fallback BTC/USD from Binance API"""
-    async with httpx.AsyncClient(timeout=8) as client:
+async def _fetch_btc_usd_coincap() -> float:
+    """Fetch BTC/USD from CoinCap (no rate limits, free)"""
+    async with httpx.AsyncClient(timeout=10) as client:
+        r = await client.get("https://api.coincap.io/v2/rates/bitcoin")
+        r.raise_for_status()
+        data = r.json()
+        return float(data["data"]["rateUsd"])
+
+
+async def _fetch_btc_usd_binance() -> float:
+    """Fetch BTC/USDT from Binance"""
+    async with httpx.AsyncClient(timeout=10) as client:
         r = await client.get("https://api.binance.com/api/v3/ticker/price", params={"symbol": "BTCUSDT"})
         r.raise_for_status()
         data = r.json()
         return float(data["price"])
 
 
-# ─────────────────────────────────────────────
-# FETCH ZMW/USD — with retry logic
-# ─────────────────────────────────────────────
 async def _fetch_zmw_usd_with_retry() -> Tuple[float, str]:
-    """Fetch ZMW/USD with provider fallback and retry"""
+    """Fetch ZMW/USD with provider fallback"""
     providers = [
-        (
-            "bankofzambia",
-            "https://www.boz.zm/ExchangeRates.xml",  # Official Bank of Zambia
-             lambda d: parse_boz_rate(d),  # Would need XML parsing
-     ),
         (
             "exchangerate-api",
             "https://api.exchangerate-api.com/v4/latest/USD",
@@ -203,37 +211,40 @@ async def _fetch_zmw_usd_with_retry() -> Tuple[float, str]:
             "https://open.er-api.com/v6/latest/USD",
             lambda d: float(d["rates"]["ZMW"]),
         ),
-        (
-            "fxratesapi",
-            "https://api.fxratesapi.com/latest?base=USD",
-            lambda d: float(d["rates"]["ZMW"]),
-        ),
     ]
 
-    async with httpx.AsyncClient(timeout=8) as client:
+    async with httpx.AsyncClient(timeout=10) as client:
         for name, url, extractor in providers:
-            for attempt in range(2):  # 2 attempts per provider
-                try:
-                    r = await client.get(url)
+            try:
+                r = await client.get(url)
+                r.raise_for_status()
+                zmw = extractor(r.json())
+                
+                if zmw and 10 <= zmw <= 35:
+                    return zmw, name
+                else:
+                    logger.warning(f"⚠️ Suspicious ZMW rate from {name}: {zmw} — skipping")
                     
-                    if r.status_code == 429:
-                        await asyncio.sleep(2)
-                        continue
-                        
-                    r.raise_for_status()
-                    zmw = extractor(r.json())
-                    
-                    # Sanity check: ZMW should be between 10-35 per USD
-                    if zmw and 10 <= zmw <= 35:
-                        return zmw, name
-                    else:
-                        logger.warning(f"⚠️  Suspicious ZMW rate from {name}: {zmw} — skipping")
-                        
-                except Exception as e:
-                    logger.debug(f"Provider {name} attempt {attempt + 1} failed: {e}")
-                    await asyncio.sleep(1)
+            except Exception as e:
+                logger.debug(f"Provider {name} failed: {e}")
+                await asyncio.sleep(1)
 
     raise ValueError("All ZMW/USD FX providers failed")
+
+
+def parse_boz_rate(xml_content: str) -> float:
+    """Parse Bank of Zambia exchange rate from XML"""
+    try:
+        root = ET.fromstring(xml_content)
+        # Find USD/ZMW rate in the XML structure
+        for currency in root.findall(".//currency"):
+            if currency.findtext("currencyCode") == "USD":
+                buying_rate = currency.findtext("buyingRate")
+                if buying_rate:
+                    return float(buying_rate)
+    except Exception as e:
+        logger.debug(f"BOZ XML parsing failed: {e}")
+    raise ValueError("Could not parse BOZ rate")
 
 
 # ─────────────────────────────────────────────
