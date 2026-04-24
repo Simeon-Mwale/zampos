@@ -1,4 +1,4 @@
-// app/owner/page.tsx — ZamPOS Owner Dashboard v2.2
+// app/owner/page.tsx — ZamPOS Owner Dashboard v2.3 (Production)
 'use client'
 
 import { useState, useEffect, useCallback, useRef } from 'react'
@@ -62,7 +62,7 @@ const fmtZMW = (n: number | null | undefined) => {
   return `K ${n.toFixed(2)}`
 }
 const fmtDate = (s: string) => new Date(s).toLocaleDateString('en-ZM', { day:'2-digit', month:'short', year:'numeric' })
-const fmtTime = (s: string) => new Date(s).toLocaleTimeString('en-ZM', { hour:'2-digit', minute:'2-digit' })
+const fmtTime = (d: Date) => d.toLocaleTimeString('en-ZM', { hour:'2-digit', minute:'2-digit' })
 const toZMW   = (sats: number, rate: RateData | null) =>
   rate?.zmw_per_btc ? (sats / 1e8) * rate.zmw_per_btc : 0
 
@@ -81,13 +81,18 @@ async function apiFetch<T>(path: string): Promise<T> {
 }
 
 function exportCSV(earnings: EarningsData, rate: RateData | null, merchants: MerchantData[]) {
+  // FIXED: Use actual 0.5% spread model instead of hardcoded 50 sats
+  const avgFeePercent = 0.5 // 0.5% spread
+  const estimatedFeeZMW = toZMW(earnings.total_fee_sats, rate)
+  
   const rows = [
     ['Metric','Sats','ZMW','Notes'],
-    ['Total Gas Fees', fmtSats(earnings.total_fee_sats), fmtZMW(toZMW(earnings.total_fee_sats,rate)), '50 sats/sweep'],
-    ['Total Volume',   fmtSats(earnings.total_gross_sats), fmtZMW(toZMW(earnings.total_gross_sats,rate)), 'Gross'],
-    ['Merchant Payouts', fmtSats(earnings.total_net_sats), fmtZMW(toZMW(earnings.total_net_sats,rate)), 'Net'],
-    ['Total Sweeps',   earnings.sweep_count.toString(), '-', ''],
-    ['Merchants',      merchants.length.toString(), '-', ''],
+    ['Total Gas Fees (Spread)', fmtSats(earnings.total_fee_sats), fmtZMW(estimatedFeeZMW), `${avgFeePercent}% of volume`],
+    ['Total Volume',   fmtSats(earnings.total_gross_sats), fmtZMW(toZMW(earnings.total_gross_sats, rate)), 'Gross sales'],
+    ['Merchant Payouts', fmtSats(earnings.total_net_sats), fmtZMW(toZMW(earnings.total_net_sats, rate)), 'Net after spread'],
+    ['Total Transactions',   earnings.sweep_count.toString(), '-', 'Number of sweeps'],
+    ['Merchants',      merchants.length.toString(), '-', 'Active merchants'],
+    ['Fee Model',      '0.5% spread', '-', 'Applied to each transaction'],
   ]
   const csv  = rows.map(r => r.join(',')).join('\n')
   const blob = new Blob([csv], { type: 'text/csv' })
@@ -125,6 +130,7 @@ export default function OwnerDashboard() {
   const [loading,     setLoading]     = useState(false)
   const [error,       setError]       = useState<string | null>(null)
   const [lastRefresh, setLastRefresh] = useState<Date | null>(null)
+  const [sweeping,    setSweeping]    = useState(false)
 
   const [search,      setSearch]      = useState('')
   const [expandedId,  setExpandedId]  = useState<number | null>(null)
@@ -132,7 +138,7 @@ export default function OwnerDashboard() {
   const [copiedWallet, setCopied]     = useState(false)
 
   const timerRef = useRef<NodeJS.Timeout | null>(null)
-  const WALLET   = 'flashysuit96@walletofsatoshi.com'  // ✅ UPDATED to your wallet
+  const WALLET   = 'flashysuit96@walletofsatoshi.com'
 
   // ── Auth ──────────────────────────────────────────────────────────────────
   const login = useCallback(() => {
@@ -179,6 +185,24 @@ export default function OwnerDashboard() {
       setLoading(false)
     }
   }, [authed])
+
+  const handleAutoSweep = async () => {
+    setSweeping(true)
+    try {
+      const res = await fetch(`${API}/owner/auto-sweep?force=true`, { method: 'POST' })
+      const data = await res.json()
+      if (data.success) {
+        alert(`✅ ${data.message}\nAmount: ${data.amount} sats\nSent to: ${data.wallet}`)
+        await fetchAll()
+      } else {
+        alert(`❌ Sweep failed: ${data.message}`)
+      }
+    } catch (err) {
+      alert('Auto-sweep failed. Check console.')
+    } finally {
+      setSweeping(false)
+    }
+  }
 
   useEffect(() => {
     if (typeof window !== 'undefined' && sessionStorage.getItem('zampos_owner_auth') === 'true') {
@@ -269,7 +293,7 @@ export default function OwnerDashboard() {
         <div className="flex items-center gap-3">
           {lastRefresh && (
             <span className="text-muted font-mono text-xs hidden sm:block">
-              {fmtTime(lastRefresh.toISOString())}
+              {fmtTime(lastRefresh)}
             </span>
           )}
           <button onClick={fetchAll} disabled={loading}
@@ -330,147 +354,133 @@ export default function OwnerDashboard() {
           </div>
         </div>
 
-        {/* ── OVERVIEW TAB ── */}
+        {/* ── OVERVIEW TAB ── (FIXED: Now only shows on overview) */}
         {activeTab === 'overview' && (
-          loading && !earnings ? <Skeleton /> : earnings ? (
-            <div className="space-y-5">
+          <>
+            {loading && !earnings ? <Skeleton /> : earnings ? (
+              <div className="space-y-5">
 
-              {/* Main fee stat */}
-              <div className="bg-panel border border-border rounded-2xl p-6">
-                <p className="text-text-dim text-xs font-mono uppercase tracking-widest flex items-center gap-2 mb-3">
-                  <TrendingUp size={12} /> Total Gas Fees Collected
-                </p>
-                <div className="flex items-end gap-3">
-                  <p className="font-display font-bold text-4xl text-bitcoin">
-                    {fmtSats(earnings.total_fee_sats)}
+                {/* Main fee stat */}
+                <div className="bg-panel border border-border rounded-2xl p-6">
+                  <p className="text-text-dim text-xs font-mono uppercase tracking-widest flex items-center gap-2 mb-3">
+                    <TrendingUp size={12} /> Total Fees Collected (0.5% Spread)
                   </p>
-                  <p className="text-bitcoin font-mono text-lg mb-1">sats</p>
-                </div>
-                <p className="text-text-dim font-mono text-sm mt-1">
-                  ≈ {fmtZMW(toZMW(earnings.total_fee_sats, rate))}
-                  {rate && (
-                    <span className="text-muted text-xs ml-2">
-                      @ {fmtSats(rate.zmw_per_btc)} ZMW/BTC
-                    </span>
-                  )}
-                </p>
-              </div>
-
-              {/* Stats grid */}
-              <div className="grid grid-cols-3 gap-3">
-                {[
-                  { label: 'Sweeps',    value: earnings.sweep_count,        sub: 'payments' },
-                  { label: 'Volume',    value: fmtSats(earnings.total_gross_sats), sub: 'gross sats' },
-                  { label: 'Merchants', value: merchants.length,             sub: 'registered' },
-                ].map(s => (
-                  <div key={s.label} className="bg-panel border border-border rounded-2xl p-4">
-                    <p className="text-text-dim text-xs font-mono uppercase tracking-widest">{s.label}</p>
-                    <p className="font-display font-bold text-2xl text-text mt-1">{s.value}</p>
-                    <p className="text-text-dim font-mono text-xs mt-0.5">{s.sub}</p>
-                  </div>
-                ))}
-              </div>
-
-              {/* Custodial balances held */}
-              {custodialTotal > 0 && (
-                <div className="bg-amber-400/10 border border-amber-400/30 rounded-2xl p-4 flex items-center justify-between">
-                  <div>
-                    <p className="text-amber-400 font-mono text-xs uppercase tracking-widest">Custodial Balances Held</p>
-                    <p className="font-display font-bold text-2xl text-amber-400 mt-1">
-                      {fmtSats(custodialTotal)} sats
+                  <div className="flex items-end gap-3">
+                    <p className="font-display font-bold text-4xl text-bitcoin">
+                      {fmtSats(earnings.total_fee_sats)}
                     </p>
-                    <p className="text-amber-400/70 font-mono text-xs mt-0.5">
-                      ≈ {fmtZMW(toZMW(custodialTotal, rate))} · pending withdrawal
-                    </p>
+                    <p className="text-bitcoin font-mono text-lg mb-1">sats</p>
                   </div>
-                  <Wallet size={24} className="text-amber-400" />
+                  <p className="text-text-dim font-mono text-sm mt-1">
+                    ≈ {fmtZMW(toZMW(earnings.total_fee_sats, rate))}
+                    {rate && (
+                      <span className="text-muted text-xs ml-2">
+                        @ {fmtSats(rate.zmw_per_btc)} ZMW/BTC
+                      </span>
+                    )}
+                  </p>
                 </div>
-              )}
 
-              {/* Revenue breakdown + export */}
-              <div className="bg-panel border border-border rounded-2xl p-5 space-y-4">
-                <div className="flex items-center justify-between">
-                  <p className="text-text-dim text-xs font-mono uppercase tracking-widest">Revenue Breakdown</p>
-                  <button
-                    onClick={() => earnings && exportCSV(earnings, rate, merchants)}
-                    className="text-bitcoin hover:text-bitcoin/70 flex items-center gap-1 text-xs font-mono transition-colors">
-                    <Download size={11} /> Export CSV
-                  </button>
-                </div>
-                <div className="space-y-3">
+                {/* Stats grid */}
+                <div className="grid grid-cols-3 gap-3">
                   {[
-                    { label: 'Gas fee/payment', sub: '50 sats flat', sats: 50,                         bold: true },
-                    { label: 'Total collected', sub: `${earnings.sweep_count} × 50 sats`, sats: earnings.total_fee_sats, bold: true },
-                    { label: 'Merchant payouts', sub: 'Net swept out', sats: earnings.total_net_sats,  bold: false },
-                  ].map((row, i) => (
-                    <div key={i} className={`flex items-center justify-between py-2 ${i < 2 ? 'border-b border-border' : ''}`}>
-                      <div>
-                        <p className="text-text font-mono text-sm">{row.label}</p>
-                        <p className="text-text-dim font-mono text-xs">{row.sub}</p>
-                      </div>
-                      <div className="text-right">
-                        <p className={`font-mono text-sm ${row.bold ? 'text-bitcoin font-bold' : 'text-text'}`}>
-                          {fmtSats(row.sats)} sats
-                        </p>
-                        <p className="text-text-dim font-mono text-xs">≈ {fmtZMW(toZMW(row.sats, rate))}</p>
-                      </div>
+                    { label: 'Transactions', value: earnings.sweep_count,        sub: 'total sales' },
+                    { label: 'Volume',       value: fmtSats(earnings.total_gross_sats), sub: 'gross sats' },
+                    { label: 'Merchants',    value: merchants.length,             sub: 'registered' },
+                  ].map(s => (
+                    <div key={s.label} className="bg-panel border border-border rounded-2xl p-4">
+                      <p className="text-text-dim text-xs font-mono uppercase tracking-widest">{s.label}</p>
+                      <p className="font-display font-bold text-2xl text-text mt-1">{s.value}</p>
+                      <p className="text-text-dim font-mono text-xs mt-0.5">{s.sub}</p>
                     </div>
                   ))}
                 </div>
+
+                {/* Custodial balances held */}
+                {custodialTotal > 0 && (
+                  <div className="bg-amber-400/10 border border-amber-400/30 rounded-2xl p-4 flex items-center justify-between">
+                    <div>
+                      <p className="text-amber-400 font-mono text-xs uppercase tracking-widest">Custodial Balances Held</p>
+                      <p className="font-display font-bold text-2xl text-amber-400 mt-1">
+                        {fmtSats(custodialTotal)} sats
+                      </p>
+                      <p className="text-amber-400/70 font-mono text-xs mt-0.5">
+                        ≈ {fmtZMW(toZMW(custodialTotal, rate))} · pending withdrawal
+                      </p>
+                    </div>
+                    <Wallet size={24} className="text-amber-400" />
+                  </div>
+                )}
+
+                {/* Revenue breakdown + export */}
+                <div className="bg-panel border border-border rounded-2xl p-5 space-y-4">
+                  <div className="flex items-center justify-between">
+                    <p className="text-text-dim text-xs font-mono uppercase tracking-widest">Revenue Breakdown</p>
+                    <button
+                      onClick={() => earnings && exportCSV(earnings, rate, merchants)}
+                      className="text-bitcoin hover:text-bitcoin/70 flex items-center gap-1 text-xs font-mono transition-colors">
+                      <Download size={11} /> Export CSV
+                    </button>
+                  </div>
+                  <div className="space-y-3">
+                    {[
+                      { label: 'Fee rate', sub: '0.5% spread on each transaction', sats: null, bold: false },
+                      { label: 'Total collected', sub: `${earnings.sweep_count} transactions`, sats: earnings.total_fee_sats, bold: true },
+                      { label: 'Merchant payouts', sub: 'Net after spread', sats: earnings.total_net_sats, bold: false },
+                    ].map((row, i) => (
+                      <div key={i} className={`flex items-center justify-between py-2 ${i < 2 ? 'border-b border-border' : ''}`}>
+                        <div>
+                          <p className="text-text font-mono text-sm">{row.label}</p>
+                          <p className="text-text-dim font-mono text-xs">{row.sub}</p>
+                        </div>
+                        {row.sats !== null && (
+                          <div className="text-right">
+                            <p className={`font-mono text-sm ${row.bold ? 'text-bitcoin font-bold' : 'text-text'}`}>
+                              {fmtSats(row.sats)} sats
+                            </p>
+                            <p className="text-text-dim font-mono text-xs">≈ {fmtZMW(toZMW(row.sats, rate))}</p>
+                          </div>
+                        )}
+                      </div>
+                    ))}
+                  </div>
+                </div>
+
+                {/* Auto-Sweep Section - FIXED: Now properly inside overview tab only */}
+                <div className="bg-panel border border-border rounded-2xl p-5 space-y-4">
+                  <div className="flex items-center justify-between">
+                    <p className="text-text-dim text-xs font-mono uppercase tracking-widest">Auto-Sweep Control</p>
+                    <button
+                      onClick={handleAutoSweep}
+                      disabled={sweeping || !earnings?.total_fee_sats}
+                      className="bg-bitcoin hover:bg-bitcoin-dark disabled:opacity-40 text-surface px-4 py-2 rounded-xl text-xs font-mono font-bold transition-all"
+                    >
+                      {sweeping ? 'Sweeping...' : 'Sweep Now'}
+                    </button>
+                  </div>
+                  <div className="space-y-2">
+                    <div className="flex justify-between text-sm font-mono">
+                      <span className="text-text-dim">Min sweep threshold:</span>
+                      <span className="text-bitcoin font-bold">10,000 sats</span>
+                    </div>
+                    <div className="flex justify-between text-sm font-mono">
+                      <span className="text-text-dim">Your wallet:</span>
+                      <span className="text-text truncate ml-2">{WALLET}</span>
+                    </div>
+                    <p className="text-muted text-xs font-mono mt-2">
+                      ⚡ Auto-sweep sends accumulated fees to your wallet when balance exceeds 10,000 sats.
+                    </p>
+                  </div>
+                </div>
+
               </div>
-
-            </div>
-          ) : !loading ? (
-            <div className="text-center py-16 text-text-dim font-mono text-sm">
-              No earnings data yet — waiting for first sweep.
-            </div>
-          ) : null
+            ) : !loading ? (
+              <div className="text-center py-16 text-text-dim font-mono text-sm">
+                No earnings data yet — waiting for first transaction.
+              </div>
+            ) : null}
+          </>
         )}
-
-        {/* Auto-Sweep Section */}
-<div className="bg-panel border border-border rounded-2xl p-5 space-y-4">
-  <div className="flex items-center justify-between">
-    <p className="text-text-dim text-xs font-mono uppercase tracking-widest">Auto-Sweep Control</p>
-    <button
-      onClick={async () => {
-        setLoading(true)
-        try {
-          const res = await fetch(`${API}/owner/auto-sweep?force=true`, {
-            method: 'POST'
-          })
-          const data = await res.json()
-          if (data.success) {
-            alert(`✅ ${data.message}\nAmount: ${data.amount} sats\nSent to: ${data.wallet}`)
-            await fetchAll()
-          } else {
-            alert(`❌ Sweep failed: ${data.message}`)
-          }
-        } catch (err) {
-          alert('Auto-sweep failed. Check console.')
-        } finally {
-          setLoading(false)
-        }
-      }}
-      disabled={loading || !earnings?.total_fee_sats}
-      className="bg-bitcoin hover:bg-bitcoin-dark disabled:opacity-40 text-surface px-4 py-2 rounded-xl text-xs font-mono font-bold transition-all"
-    >
-      {loading ? 'Sweeping...' : 'Auto-Sweep Now'}
-    </button>
-  </div>
-  <div className="space-y-2">
-    <div className="flex justify-between text-sm font-mono">
-      <span className="text-text-dim">Min sweep threshold:</span>
-      <span className="text-bitcoin font-bold">10,000 sats</span>
-    </div>
-    <div className="flex justify-between text-sm font-mono">
-      <span className="text-text-dim">Your wallet:</span>
-      <span className="text-text truncate ml-2">flashysuit96@walletofsatoshi.com</span>
-    </div>
-    <p className="text-muted text-xs font-mono mt-2">
-      ⚡ Auto-sweep will automatically send accumulated gas fees to your wallet when balance exceeds 10,000 sats.
-    </p>
-  </div>
-</div>
 
         {/* ── MERCHANTS TAB ── */}
         {activeTab === 'merchants' && (
@@ -642,13 +652,13 @@ export default function OwnerDashboard() {
             </div>
 
             <p className="text-center text-muted font-mono text-xs pb-2">
-              Mark withdrawals as sent via the API: POST /owner/withdrawals/&#123;id&#125;/mark-sent
+              Mark withdrawals as sent via API: POST /owner/withdrawals/&#123;id&#125;/mark-sent
             </p>
           </div>
         )}
 
         <footer className="text-center text-muted font-mono text-xs pb-4">
-          🇿🇲 ZamPOS Owner · Gas fees accumulate here. Send to your wallet manually when ready.
+          🇿🇲 ZamPOS Owner · 0.5% spread on all transactions
         </footer>
       </div>
     </main>
