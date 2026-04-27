@@ -1,4 +1,4 @@
-# backend/services/rate_service.py - Improved with better rate limiting handling
+# backend/services/rate_service.py - Improved with better rate limiting handling + BOZ fallback
 import httpx
 import os
 import time
@@ -17,11 +17,17 @@ CACHE_TTL = int(os.getenv("RATE_CACHE_TTL_SECONDS", "180"))  # Increased to 3 mi
 REQUEST_DELAY = float(os.getenv("RATE_REQUEST_DELAY_SECONDS", "3.0"))  # Throttle more
 MAX_RETRIES = 2
 
+# BOZ Configuration (as fallback)
+BOZ_API_URL = os.getenv("BOZ_API_URL", "https://www.boz.zm/ExchangeRates.xml")
+BOZ_API_KEY = os.getenv("BOZ_API_KEY", "")
+BOZ_ENABLED = os.getenv("BOZ_ENABLED", "true").lower() == "true"
+
 _cache = {
     "zmw_per_btc": None,
     "sats_per_zmw": None,
     "timestamp": 0,
     "source": "none",
+    "boz_usd_zmw": None,
 }
 
 _last_request_time = 0
@@ -42,11 +48,78 @@ def get_cache_metadata() -> dict:
         "source": _cache["source"],
         "is_valid": _cache["zmw_per_btc"] is not None and age < CACHE_TTL,
         "age_seconds": int(age),
+        "boz_usd_zmw": float(_cache["boz_usd_zmw"]) if _cache["boz_usd_zmw"] else None,
     }
 
 
+async def fetch_boz_usd_zmw() -> Optional[float]:
+    """
+    Fetch official Bank of Zambia USD/ZMW exchange rate.
+    Returns ZMW per USD (e.g., 28.5) or None if fails.
+    Used as fallback when primary FX sources fail.
+    """
+    if not BOZ_ENABLED:
+        return None
+    
+    try:
+        async with httpx.AsyncClient(timeout=15) as client:
+            headers = {}
+            if BOZ_API_KEY:
+                headers["Authorization"] = f"Bearer {BOZ_API_KEY}"
+            
+            response = await client.get(BOZ_API_URL, headers=headers)
+            response.raise_for_status()
+            
+            content_type = response.headers.get("content-type", "")
+            
+            # Parse XML format
+            if "xml" in content_type or response.text.strip().startswith("<?xml"):
+                root = ET.fromstring(response.text)
+                
+                # Try different XML structures
+                for currency in root.findall(".//currency"):
+                    code_elem = currency.find("currencyCode")
+                    if code_elem is not None and code_elem.text == "USD":
+                        for rate_field in ["buyingRate", "midRate", "sellingRate"]:
+                            rate_elem = currency.find(rate_field)
+                            if rate_elem is not None and rate_elem.text:
+                                rate = float(rate_elem.text)
+                                if 10 <= rate <= 35:
+                                    logger.info(f"🏦 BOZ fallback rate: {rate} ZMW/USD")
+                                    return rate
+                
+                # Alternative structure
+                for rate_elem in root.findall(".//rate"):
+                    if rate_elem.get("currency") == "USD":
+                        rate = float(rate_elem.text)
+                        if 10 <= rate <= 35:
+                            logger.info(f"🏦 BOZ fallback rate: {rate} ZMW/USD")
+                            return rate
+            
+            # Parse JSON format
+            elif "json" in content_type or response.text.strip().startswith("{"):
+                data = response.json()
+                if "rates" in data and "USD" in data["rates"]:
+                    rate = float(data["rates"]["USD"])
+                    if 10 <= rate <= 35:
+                        logger.info(f"🏦 BOZ fallback rate: {rate} ZMW/USD")
+                        return rate
+                if "USD" in data:
+                    rate = float(data["USD"])
+                    if 10 <= rate <= 35:
+                        logger.info(f"🏦 BOZ fallback rate: {rate} ZMW/USD")
+                        return rate
+                        
+    except httpx.TimeoutException:
+        logger.debug("BOZ API timeout")
+    except Exception as e:
+        logger.debug(f"BOZ fetch failed: {e}")
+    
+    return None
+
+
 async def fetch_live_rates(force_refresh: bool = False) -> Tuple[Decimal, Decimal]:
-    """Fetch current BTC/ZMW rate with improved caching and fallback"""
+    """Fetch current BTC/ZMW rate with improved caching and BOZ as fallback"""
     global _rate_limit_backoff
     now = time.time()
 
@@ -66,16 +139,26 @@ async def fetch_live_rates(force_refresh: bool = False) -> Tuple[Decimal, Decima
         await _throttle_requests()
         btc_usd = await _fetch_btc_usd_with_backoff()
         
-        # Get ZMW/USD rate
+        # Get ZMW/USD rate (primary sources)
         try:
             zmw_usd, fx_source = await _fetch_zmw_usd_with_retry()
             source = f"coingecko+{fx_source}"
             logger.debug(f"📈 Live FX rate: 1 USD = {zmw_usd} ZMW (via {fx_source})")
         except Exception as fx_err:
-            logger.warning(f"⚠️ FX sources failed, using fallback: {fx_err}")
-            zmw_usd = float(FALLBACK_ZMW_PER_USD)
-            source = "coingecko+fx-fallback"
-            errors.append(f"FX: {fx_err}")
+            logger.warning(f"⚠️ Primary FX sources failed: {fx_err}")
+            
+            # FALLBACK: Try BOZ official rate
+            boz_rate = await fetch_boz_usd_zmw()
+            if boz_rate:
+                zmw_usd = boz_rate
+                source = f"coingecko+BOZ-fallback"
+                _cache["boz_usd_zmw"] = Decimal(str(boz_rate))
+                logger.info(f"🏦 Using BOZ fallback rate: {zmw_usd} ZMW/USD")
+            else:
+                # Final fallback
+                zmw_usd = float(FALLBACK_ZMW_PER_USD)
+                source = "coingecko+fx-fallback"
+                errors.append(f"FX: {fx_err}")
 
         zmw_per_btc = Decimal(str(btc_usd)) * Decimal(str(zmw_usd))
         
@@ -93,9 +176,18 @@ async def fetch_live_rates(force_refresh: bool = False) -> Tuple[Decimal, Decima
         try:
             await _throttle_requests()
             btc_usd = await _fetch_btc_usd_coincap()
-            zmw_usd = float(FALLBACK_ZMW_PER_USD)
+            
+            # Try BOZ for ZMW/USD first, then fallback
+            boz_rate = await fetch_boz_usd_zmw()
+            if boz_rate:
+                zmw_usd = boz_rate
+                source = "coincap+BOZ-fallback"
+                _cache["boz_usd_zmw"] = Decimal(str(boz_rate))
+            else:
+                zmw_usd = float(FALLBACK_ZMW_PER_USD)
+                source = "coincap+fx-fallback"
+            
             zmw_per_btc = Decimal(str(btc_usd)) * Decimal(str(zmw_usd))
-            source = "coincap+fx-fallback"
             logger.info(f"✅ Using CoinCap API: {btc_usd} USD/BTC")
         except Exception as e:
             logger.warning(f"❌ CoinCap API failed: {e}")
@@ -108,9 +200,18 @@ async def fetch_live_rates(force_refresh: bool = False) -> Tuple[Decimal, Decima
         try:
             await _throttle_requests()
             btc_usd = await _fetch_btc_usd_binance()
-            zmw_usd = float(FALLBACK_ZMW_PER_USD)
+            
+            # Try BOZ for ZMW/USD first, then fallback
+            boz_rate = await fetch_boz_usd_zmw()
+            if boz_rate:
+                zmw_usd = boz_rate
+                source = "binance+BOZ-fallback"
+                _cache["boz_usd_zmw"] = Decimal(str(boz_rate))
+            else:
+                zmw_usd = float(FALLBACK_ZMW_PER_USD)
+                source = "binance+fx-fallback"
+            
             zmw_per_btc = Decimal(str(btc_usd)) * Decimal(str(zmw_usd))
-            source = "binance+fx-fallback"
             logger.info(f"✅ Using Binance API: {btc_usd} USD/BTC")
         except Exception as e:
             logger.warning(f"❌ Binance API failed: {e}")
@@ -199,7 +300,7 @@ async def _fetch_btc_usd_binance() -> float:
 
 
 async def _fetch_zmw_usd_with_retry() -> Tuple[float, str]:
-    """Fetch ZMW/USD with provider fallback"""
+    """Fetch ZMW/USD with provider fallback (primary sources)"""
     providers = [
         (
             "exchangerate-api",
