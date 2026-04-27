@@ -1,4 +1,4 @@
-/ app/page.tsx — ZamPOS v3.1: Production Ready + Direct Mode Only (Sweep Coming Soon)
+// app/page.tsx — ZamPOS v3.1: Production Ready + Direct Mode Only (Sweep Coming Soon)
 'use client'
 
 import SummaryCard from '@/components/SummaryCard'
