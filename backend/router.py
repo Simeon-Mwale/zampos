@@ -1,13 +1,14 @@
-# backend/router.py — ZamPOS v2.4 (+ ZamPay / BitZed Mobile Money)
+# backend/router.py — ZamPOS v2.5 (+ USSD via Africa's Talking + Merchant Short Codes)
 #
-# CHANGES vs v2.3:
-#   + ZamPay section appended at the bottom (POST /zampay/charge, POST /zampay/webhook)
-#   + ZamPayChargeRequest model added
-#   + _call_bitzed() stub — drop real BitZed SDK call inside when ready
-#   + _send_zampay_sms() background task
-#   Everything else is identical to v2.3
+# CHANGES vs v2.4:
+#   + GET  /merchant/code/{short_code}  — lookup merchant by 4-digit short code
+#   + POST /ussd                        — Africa's Talking USSD session handler
+#   + short_code column auto-assigned on register (zero-padded merchant ID, e.g. 0042)
+#   + USSDSession state machine: MAIN_MENU → MERCHANT_PAY | MERCHANT_SELL
+#   Everything else is identical to v2.4
 
-from fastapi import APIRouter, HTTPException, Request, BackgroundTasks, Query
+from fastapi import APIRouter, HTTPException, Request, BackgroundTasks, Query, Form
+from fastapi.responses import PlainTextResponse
 from pydantic import BaseModel, Field, validator
 from typing import Optional
 from decimal import Decimal
@@ -66,6 +67,16 @@ def generate_recovery_code() -> str:
 
 def _make_zampay_reference() -> str:
     return "ZP-" + secrets.token_hex(6).upper()
+
+
+def _short_code_from_id(merchant_id: int) -> str:
+    """
+    Derive a 4-digit short code from merchant ID.
+    merchant_id=1  → '0001'
+    merchant_id=42 → '0042'
+    Codes above 9999 wrap: merchant_id=10001 → '0001' (collision handled in lookup)
+    """
+    return str(merchant_id % 10000).zfill(4)
 
 
 # ─────────────────────────────────────────────────────────────
@@ -239,6 +250,436 @@ async def api_check_duplicate_merchant(
 
 
 # ─────────────────────────────────────────────────────────────
+# MERCHANT SHORT CODE LOOKUP
+# GET /merchant/code/{short_code}
+# e.g. GET /merchant/code/0042
+# Africa's Talking USSD handler calls this to resolve merchant from customer input
+# ─────────────────────────────────────────────────────────────
+
+@router.get("/merchant/code/{short_code}")
+async def get_merchant_by_short_code(short_code: str):
+    """
+    Resolve a 4-digit merchant short code to a merchant record.
+    Short code = zero-padded merchant ID (e.g. merchant_id=42 → '0042').
+    Used by the USSD flow so customers can enter a short code instead of a phone number.
+    """
+    short_code = short_code.strip().zfill(4)
+
+    # Validate format
+    if not short_code.isdigit() or len(short_code) != 4:
+        raise HTTPException(400, "Short code must be 4 digits e.g. 0042")
+
+    # Derive merchant_id from short code (reverse of _short_code_from_id)
+    merchant_id = int(short_code)
+    if merchant_id == 0:
+        raise HTTPException(404, "Merchant not found")
+
+    m = await get_merchant_by_id(merchant_id)
+    if not m:
+        raise HTTPException(404, f"No merchant found for code {short_code}")
+
+    return {
+        "short_code":       short_code,
+        "merchant_id":      m["id"],
+        "shop_name":        m["shop_name"],
+        "location":         m.get("location"),
+        "payout_mode":      m["payout_mode"],
+        "lightning_address": m.get("lightning_address"),
+    }
+
+
+# ─────────────────────────────────────────────────────────────
+# USSD — Africa's Talking Session Handler
+# POST /ussd
+#
+# Register this URL in your Africa's Talking dashboard:
+#   https://yourdomain.com/ussd
+#
+# AT posts these form fields on every USSD request:
+#   sessionId   — unique per USSD dial session
+#   serviceCode — your shortcode e.g. *384*xx#
+#   phoneNumber — caller's number e.g. +260971234567
+#   text        — all user inputs joined by * e.g. "1*0042*50"
+#
+# Response must be plain text:
+#   "CON <message>"  — continue session (show menu, await input)
+#   "END <message>"  — end session (final screen, no input)
+#
+# State machine:
+#   text=""          → MAIN MENU
+#   text="1"         → PAY a merchant (customer flow)
+#   text="1*XXXX"    → customer entered merchant code → confirm merchant name
+#   text="1*XXXX*A"  → customer entered amount → confirm screen
+#   text="1*XXXX*A*1"→ customer confirmed → create invoice + end session
+#   text="2"         → I AM A MERCHANT (merchant flow)
+#   text="2*A"       → merchant entered amount → confirm screen
+#   text="2*A*1"     → merchant confirmed → create invoice, await payment
+# ─────────────────────────────────────────────────────────────
+
+@router.post("/ussd", response_class=PlainTextResponse)
+async def ussd_handler(
+    sessionId:   str = Form(...),
+    serviceCode: str = Form(...),
+    phoneNumber: str = Form(...),
+    text:        str = Form(default=""),
+):
+    """
+    Africa's Talking USSD gateway handler.
+    Returns CON (continue) or END (terminate) plain text responses.
+    """
+    # Split input chain — AT joins steps with *
+    parts = [p.strip() for p in text.split("*")] if text.strip() else []
+
+    logger.info(f"USSD | session={sessionId} | phone={phoneNumber} | text='{text}' | parts={parts}")
+
+    # ── MAIN MENU ────────────────────────────────────────────
+    if not parts or parts == [""]:
+        return (
+            "CON Welcome to ZamPOS ⚡\n"
+            "Bitcoin Lightning Payments\n"
+            "━━━━━━━━━━━━━━━━━\n"
+            "1. Pay a Merchant\n"
+            "2. I am a Merchant\n"
+            "0. Exit"
+        )
+
+    # ── CUSTOMER FLOW: Pay a Merchant ────────────────────────
+    if parts[0] == "1":
+
+        # Step 1: Ask for merchant short code
+        if len(parts) == 1:
+            return (
+                "CON Enter merchant code:\n"
+                "(4-digit code e.g. 0042)\n"
+                "Ask the merchant for their code"
+            )
+
+        # Step 2: Validate short code + confirm merchant name
+        if len(parts) == 2:
+            short_code = parts[1].zfill(4)
+            merchant_id = int(short_code) if short_code.isdigit() else 0
+            if merchant_id == 0:
+                return "END ❌ Invalid merchant code.\nPlease try again."
+
+            m = await get_merchant_by_id(merchant_id)
+            if not m:
+                return f"END ❌ No merchant found\nfor code {short_code}.\nPlease check and try again."
+
+            return (
+                f"CON Merchant found:\n"
+                f"{m['shop_name']}\n"
+                f"{m.get('location') or 'Zambia'}\n"
+                f"━━━━━━━━━━━━━━━━━\n"
+                f"Enter amount in ZMW (K):\n"
+                f"e.g. 50"
+            )
+
+        # Step 3: Amount entered → show confirmation
+        if len(parts) == 3:
+            short_code  = parts[1].zfill(4)
+            amount_text = parts[2].strip()
+
+            try:
+                amount_zmw = float(amount_text)
+                if amount_zmw < MIN_ZMW:
+                    return f"END ❌ Minimum amount is K{MIN_ZMW:.0f}"
+            except ValueError:
+                return "END ❌ Invalid amount.\nEnter numbers only e.g. 50"
+
+            merchant_id = int(short_code) if short_code.isdigit() else 0
+            m = await get_merchant_by_id(merchant_id)
+            if not m:
+                return "END ❌ Merchant not found.\nPlease try again."
+
+            # Get live rate for sats preview
+            try:
+                _, sats_per_zmw = await fetch_live_rates(force_refresh=False)
+                gross_sats, _, _ = calculate_spread(amount_zmw, float(sats_per_zmw))
+                sats_line = f"≈ {gross_sats:,} sats ⚡\n"
+            except Exception:
+                sats_line = ""
+
+            return (
+                f"CON Confirm Payment:\n"
+                f"To: {m['shop_name']}\n"
+                f"Amount: K{amount_zmw:.2f}\n"
+                f"{sats_line}"
+                f"━━━━━━━━━━━━━━━━━\n"
+                f"1. Confirm & Pay\n"
+                f"2. Cancel"
+            )
+
+        # Step 4: Customer confirmed → create Lightning invoice
+        if len(parts) == 4:
+            choice = parts[3].strip()
+
+            if choice == "2":
+                return "END ❌ Payment cancelled."
+
+            if choice != "1":
+                return "END ❌ Invalid choice.\nPlease try again."
+
+            short_code  = parts[1].zfill(4)
+            amount_text = parts[2].strip()
+
+            try:
+                amount_zmw  = float(amount_text)
+                merchant_id = int(short_code) if short_code.isdigit() else 0
+            except ValueError:
+                return "END ❌ Something went wrong.\nPlease try again."
+
+            m = await get_merchant_by_id(merchant_id)
+            if not m:
+                return "END ❌ Merchant not found."
+
+            # Create Lightning invoice
+            try:
+                zmw_per_btc, sats_per_zmw = await fetch_live_rates(force_refresh=True)
+                gross_sats, merchant_sats, operator_sats = calculate_spread(
+                    amount_zmw, float(sats_per_zmw)
+                )
+                if gross_sats == 0:
+                    return "END ❌ Amount too small to convert.\nTry a higher amount."
+
+                invoice_address = (
+                    m["lightning_address"] if m["payout_mode"] == "direct"
+                    else OPERATOR_LIGHTNING_ADDRESS
+                )
+                bolt11       = await fetch_invoice_from_lightning_address(
+                    invoice_address, gross_sats,
+                    comment=f"ZamPOS USSD | {m['shop_name']}"
+                )
+                payment_hash = extract_payment_hash(bolt11)
+                cache_meta   = get_cache_metadata()
+
+                await save_transaction(
+                    payment_hash=payment_hash,
+                    merchant_id=merchant_id,
+                    amount_zmw=amount_zmw,
+                    gross_sats=gross_sats,
+                    merchant_sats=merchant_sats,
+                    operator_sats=operator_sats,
+                    memo=f"USSD payment | {phoneNumber}",
+                    payout_mode=m["payout_mode"],
+                    rate_snapshot={
+                        "zmw_per_btc":  float(zmw_per_btc),
+                        "sats_per_zmw": float(sats_per_zmw),
+                        "source":       "ussd",
+                        "timestamp":    cache_meta.get("last_updated"),
+                        "customer_phone": phoneNumber,
+                    },
+                )
+
+                # Kick off payment polling + SMS in background
+                asyncio.create_task(_poll_payment(
+                    payment_hash=payment_hash,
+                    merchant_id=merchant_id,
+                    gross_sats=gross_sats,
+                    payout_mode=m["payout_mode"],
+                    merchant_phone=m["phone_number"],
+                    shop_name=m["shop_name"],
+                    amount_zmw=amount_zmw,
+                    lightning_address=invoice_address,
+                ))
+
+                logger.info(
+                    f"⚡ USSD invoice | merchant={merchant_id} | "
+                    f"K{amount_zmw:.2f} | {gross_sats} sats | customer={phoneNumber}"
+                )
+
+                # Return invoice string — customer pays via any Lightning wallet
+                # Truncated for USSD display (182 char limit per screen)
+                short_bolt11 = bolt11[:60] + "..."
+                return (
+                    f"END ✅ Invoice created!\n"
+                    f"Pay K{amount_zmw:.2f} to {m['shop_name']}\n"
+                    f"━━━━━━━━━━━━━━━━━\n"
+                    f"Open your Lightning wallet\n"
+                    f"and paste this invoice:\n"
+                    f"{short_bolt11}\n"
+                    f"Or ask merchant to show QR"
+                )
+
+            except Exception as e:
+                logger.error(f"❌ USSD invoice create failed: {e}", exc_info=True)
+                return "END ❌ Payment service unavailable.\nTry again or use the ZamPOS app."
+
+        return "END ❌ Invalid input.\nPlease dial again."
+
+    # ── MERCHANT FLOW: I am a Merchant ──────────────────────
+    elif parts[0] == "2":
+
+        # Step 1: Ask for amount
+        if len(parts) == 1:
+            return (
+                "CON Enter sale amount (ZMW):\n"
+                "e.g. 150\n"
+                "Customer will pay via Lightning"
+            )
+
+        # Step 2: Amount entered → look up merchant by phone, confirm
+        if len(parts) == 2:
+            amount_text = parts[1].strip()
+            try:
+                amount_zmw = float(amount_text)
+                if amount_zmw < MIN_ZMW:
+                    return f"END ❌ Minimum amount is K{MIN_ZMW:.0f}"
+            except ValueError:
+                return "END ❌ Invalid amount.\nEnter numbers only e.g. 150"
+
+            # Look up merchant by the caller's phone number
+            m = await _get_merchant_by_phone(phoneNumber)
+            if not m:
+                return (
+                    "END ❌ Phone not registered.\n"
+                    "Register at zampos.vercel.app\n"
+                    "or ask your ZamPOS agent."
+                )
+
+            try:
+                _, sats_per_zmw = await fetch_live_rates(force_refresh=False)
+                gross_sats, _, _ = calculate_spread(amount_zmw, float(sats_per_zmw))
+                sats_line = f"≈ {gross_sats:,} sats ⚡\n"
+            except Exception:
+                sats_line = ""
+
+            return (
+                f"CON Sale for {m['shop_name']}:\n"
+                f"Amount: K{amount_zmw:.2f}\n"
+                f"{sats_line}"
+                f"━━━━━━━━━━━━━━━━━\n"
+                f"1. Generate Invoice\n"
+                f"2. Cancel"
+            )
+
+        # Step 3: Merchant confirmed → create invoice
+        if len(parts) == 3:
+            choice      = parts[2].strip()
+            amount_text = parts[1].strip()
+
+            if choice == "2":
+                return "END ❌ Cancelled."
+
+            if choice != "1":
+                return "END ❌ Invalid choice."
+
+            try:
+                amount_zmw = float(amount_text)
+            except ValueError:
+                return "END ❌ Something went wrong.\nPlease try again."
+
+            m = await _get_merchant_by_phone(phoneNumber)
+            if not m:
+                return "END ❌ Merchant not found."
+
+            try:
+                zmw_per_btc, sats_per_zmw = await fetch_live_rates(force_refresh=True)
+                gross_sats, merchant_sats, operator_sats = calculate_spread(
+                    amount_zmw, float(sats_per_zmw)
+                )
+                if gross_sats == 0:
+                    return "END ❌ Amount too small.\nTry a higher amount."
+
+                invoice_address = (
+                    m["lightning_address"] if m["payout_mode"] == "direct"
+                    else OPERATOR_LIGHTNING_ADDRESS
+                )
+                bolt11       = await fetch_invoice_from_lightning_address(
+                    invoice_address, gross_sats,
+                    comment=f"ZamPOS USSD | {m['shop_name']}"
+                )
+                payment_hash = extract_payment_hash(bolt11)
+                cache_meta   = get_cache_metadata()
+
+                await save_transaction(
+                    payment_hash=payment_hash,
+                    merchant_id=m["id"],
+                    amount_zmw=amount_zmw,
+                    gross_sats=gross_sats,
+                    merchant_sats=merchant_sats,
+                    operator_sats=operator_sats,
+                    memo=f"USSD merchant sale",
+                    payout_mode=m["payout_mode"],
+                    rate_snapshot={
+                        "zmw_per_btc":  float(zmw_per_btc),
+                        "sats_per_zmw": float(sats_per_zmw),
+                        "source":       "ussd_merchant",
+                        "timestamp":    cache_meta.get("last_updated"),
+                    },
+                )
+
+                asyncio.create_task(_poll_payment(
+                    payment_hash=payment_hash,
+                    merchant_id=m["id"],
+                    gross_sats=gross_sats,
+                    payout_mode=m["payout_mode"],
+                    merchant_phone=m["phone_number"],
+                    shop_name=m["shop_name"],
+                    amount_zmw=amount_zmw,
+                    lightning_address=invoice_address,
+                ))
+
+                short_code = _short_code_from_id(m["id"])
+                logger.info(
+                    f"⚡ USSD merchant invoice | merchant={m['id']} | "
+                    f"K{amount_zmw:.2f} | {gross_sats} sats"
+                )
+
+                return (
+                    f"END ✅ Invoice ready!\n"
+                    f"K{amount_zmw:.2f} | {gross_sats:,} sats\n"
+                    f"━━━━━━━━━━━━━━━━━\n"
+                    f"Show QR in ZamPOS app\n"
+                    f"OR tell customer:\n"
+                    f"Merchant code: {short_code}\n"
+                    f"You'll get SMS when paid ⚡"
+                )
+
+            except Exception as e:
+                logger.error(f"❌ USSD merchant invoice: {e}", exc_info=True)
+                return "END ❌ Service unavailable.\nTry again shortly."
+
+        return "END ❌ Invalid input."
+
+    # ── EXIT ─────────────────────────────────────────────────
+    elif parts[0] == "0":
+        return "END Thank you for using ZamPOS ⚡\n🇿🇲 Bitcoin Lightning Payments"
+
+    return (
+        "END ❌ Invalid option.\n"
+        "Please dial again and\n"
+        "choose 1 or 2."
+    )
+
+
+async def _get_merchant_by_phone(phone: str) -> Optional[dict]:
+    """
+    Look up a merchant by their registered phone number.
+    Normalizes Zambian number formats before matching.
+    """
+    # Normalize to local format (0971234567) for DB match
+    p = phone.strip().replace(" ", "").replace("-", "")
+    if p.startswith("+260"):
+        p = "0" + p[4:]
+    elif p.startswith("260") and len(p) == 12:
+        p = "0" + p[3:]
+
+    try:
+        async with aiosqlite.connect(DB_PATH) as db:
+            db.row_factory = aiosqlite.Row
+            # Try both normalized and original formats
+            cur = await db.execute(
+                "SELECT * FROM merchants WHERE phone_number = ? OR phone_number = ? LIMIT 1",
+                (p, phone),
+            )
+            row = await cur.fetchone()
+            return dict(row) if row else None
+    except Exception as e:
+        logger.error(f"❌ _get_merchant_by_phone: {e}")
+        return None
+
+
+# ─────────────────────────────────────────────────────────────
 # RECOVERY CODE ENDPOINTS (FREE - No SMS Costs)
 # ─────────────────────────────────────────────────────────────
 
@@ -399,10 +840,14 @@ async def register_merchant(req: MerchantRegisterRequest):
             lightning_address=req.lightning_address or "",
             recovery_code=recovery_code,
         )
+
+        # Attach short code to response (derived from assigned merchant ID)
+        short_code = _short_code_from_id(m["id"])
         
         return {
             **m,
             **wallet_info,
+            "short_code": short_code,
             "recovery_code": recovery_code,
             "recovery_warning": "⚠️ SAVE THIS CODE - You'll need it to recover your account if you lose your phone (FREE - no SMS required)"
         }
@@ -449,7 +894,7 @@ async def get_merchant(merchant_id: int):
     m = await get_merchant_by_id(merchant_id)
     if not m:
         raise HTTPException(404, "Merchant not found")
-    return m
+    return {**m, "short_code": _short_code_from_id(m["id"])}
 
 
 @router.get("/merchant/{merchant_id}/transactions")
@@ -474,6 +919,7 @@ async def get_merchant_summary(merchant_id: int):
         raise HTTPException(404, "Merchant not found")
     return {
         "merchant_id": merchant_id,
+        "short_code":  _short_code_from_id(merchant_id),
         "summary":     await get_transaction_summary(merchant_id),
     }
 
@@ -741,7 +1187,11 @@ async def owner_merchants():
                 "FROM merchants ORDER BY created_at DESC"
             )
             rows = await cur.fetchall()
-            return {"merchants": [dict(r) for r in rows], "total": len(rows)}
+            merchants = [
+                {**dict(r), "short_code": _short_code_from_id(r["id"])}
+                for r in rows
+            ]
+            return {"merchants": merchants, "total": len(merchants)}
     except Exception as e:
         logger.error(f"❌ owner_merchants: {e}")
         raise HTTPException(502, "Failed to fetch merchants")
@@ -1082,6 +1532,7 @@ async def lnurl_info(merchant_id: int):
         "shop_name":      m["shop_name"],
         "location":       m.get("location"),
         "payout_mode":    m["payout_mode"],
+        "short_code":     _short_code_from_id(merchant_id),
         "lnurl_url":      get_lnurlp_url(merchant_id),
         "lnurl_encoded":  get_lnurl_encoded(merchant_id),
         "qr_value":       get_qr_value(merchant_id),
@@ -1288,14 +1739,12 @@ async def zampay_charge(req: ZamPayChargeRequest, background_tasks: BackgroundTa
     Initiate a ZamPay (Airtel/MTN → sats) charge.
     Frontend ZamPay button posts here.
     """
-    # 1. Merchant lookup
     merchant = await get_merchant_by_id(req.merchant_id)
     if not merchant:
         raise HTTPException(404, "Merchant not found")
 
     lightning_address = merchant.get("lightning_address") or OPERATOR_LIGHTNING_ADDRESS
 
-    # 2. Rate + sats
     try:
         zmw_per_btc, sats_per_zmw = await fetch_live_rates(force_refresh=False)
         real_sats_per_zmw = float(sats_per_zmw)
@@ -1310,7 +1759,6 @@ async def zampay_charge(req: ZamPayChargeRequest, background_tasks: BackgroundTa
         logger.error(f"ZamPay rate error: {e}")
         raise HTTPException(502, "Could not fetch exchange rate. Try again.")
 
-    # 3. BitZed call (stub until BITZED_ENABLED=true)
     reference = _make_zampay_reference()
     try:
         bitzed_result = await _call_bitzed(
@@ -1332,7 +1780,6 @@ async def zampay_charge(req: ZamPayChargeRequest, background_tasks: BackgroundTa
             f"ZamPay charge failed: {bitzed_result.get('error', 'Unknown error')}"
         )
 
-    # 4. Save to DB — bitzed_ref is the payment_hash so webhook can match it
     cache_meta   = get_cache_metadata()
     payment_hash = bitzed_result["bitzed_ref"]
 
@@ -1426,7 +1873,6 @@ async def zampay_webhook(request: Request, background_tasks: BackgroundTasks):
             logger.info(f"✅ ZamPay approved | ref={reference}")
 
         else:
-            # declined / failed — expire the pending transaction
             async with aiosqlite.connect(DB_PATH) as db:
                 await db.execute(
                     "UPDATE transactions SET status='expired' "

@@ -35,16 +35,32 @@ Existing Bitcoin POS tools are built for the Global North. They assume fast inte
 - **Lightning invoice + QR** — Generates a payable BOLT11 invoice in seconds via Voltage Cloud
 - **Auto payment confirmation** — Detects payment via webhook, shows clear success screen
 - **Works globally** — Merchant prices in ZMW, customer pays from any Lightning wallet anywhere in the world 🌍
+- **ZamPay — Airtel/MTN Mobile Money** — Charge customers directly on their mobile money number; merchant receives sats instantly via Lightning
 - **Dashboard** — Daily and all-time sales in ZMW and sats, full transaction log
 - **4 languages** — English, Chinyanja, Ichibemba, Kiswahili — one tap to switch
 - **PWA** — Installs on Android home screen like a native app, works offline
+- **Offline invoice queue** — Sales queued when offline, synced automatically on reconnect
+- **Account recovery** — 16-character recovery code system; restore your account from any device
 - **No bank account needed** — Just a Lightning wallet and a phone
 
 ---
 
 ## Screenshots
 
-> Register your shop → Enter amount in ZMW → Customer scans QR → Paid ✅
+> Register your shop → Enter amount in ZMW → Customer scans QR (or pays via mobile money) → Paid ✅
+
+---
+
+## Payment Modes
+
+### ⚡ Direct Mode (Active)
+Sats are forwarded immediately to your Lightning Address after every payment. ZamPOS retains only its 0.5% spread fee. Supports any Lightning Address — Wallet of Satoshi, Phoenix, Blink, Speed, and more.
+
+### 📱 ZamPay — Airtel / MTN (Active)
+Push a mobile money charge to a customer's Airtel or MTN number. The customer approves on their phone; the merchant receives sats instantly via their Lightning Address. Powered by BitZed.
+
+### 🏦 Sweep Mode (Coming Soon)
+Accumulate sats in a custodial balance and withdraw in bulk. Under active development.
 
 ---
 
@@ -55,6 +71,7 @@ Existing Bitcoin POS tools are built for the Global North. They assume fast inte
 | Frontend | Next.js 14 + TypeScript + Tailwind CSS + PWA |
 | Backend | Python 3.12 + FastAPI + AsyncIO |
 | Lightning | Voltage Cloud (LND REST API) |
+| Mobile Money | BitZed (Airtel/MTN ZamPay integration) |
 | Database | SQLite via aiosqlite — zero config |
 | Rates | CoinGecko API (live ZMW/BTC with 45s cache) |
 | Deploy | Vercel (frontend) + Render (backend) |
@@ -158,18 +175,18 @@ Secret: your-webhook-secret
 
 ---
 
-
----
-
 ## Zambia-Specific Features
 
 | Feature | Why It Matters |
 |---|---|
+| ZamPay — Airtel/MTN | Customers without a Lightning wallet can still pay via mobile money |
 | 30-min invoice expiry | Handles slow/intermittent mobile networks |
 | Offline invoice queue | Merchants queue sales when offline, sync on reconnect |
 | ZMW-first UX | Traders think and price in Kwacha |
 | Low-end Android tested | Works on Tecno Spark, Itel A50 |
 | 4 local languages | Nyanja + Bemba cover 80%+ of Zambia |
+| 16-character recovery code | Merchants can restore their account from any device — shown once at registration |
+| Duplicate shop/phone check | Prevents accidental double-registration at onboarding |
 
 ---
 
@@ -181,8 +198,13 @@ Secret: your-webhook-secret
 - [x] PWA — Android installable, offline queue
 - [x] Gas fee engine — automatic sweep to owner Phoenix wallet
 - [x] Owner earnings dashboard
-- [ ] Multi-currency — KES, TZS, NGN, UGX
+- [x] ZamPay — Airtel/MTN mobile money push payments via BitZed
+- [x] Account recovery — 16-character code, restore from any device
+- [x] Duplicate merchant detection at onboarding
+- [x] Terms of Service gate with scroll-to-accept
+- [ ] Sweep Mode — custodial balance + bulk withdrawal (in development)
 - [ ] SMS confirmations via Africa's Talking
+- [ ] Multi-currency — KES, TZS, NGN, UGX
 - [ ] Tonga + Lozi language support
 - [ ] USSD onboarding (*123#)
 - [ ] Lusaka informal markets pilot (Soweto, Kamwala)
@@ -212,8 +234,7 @@ cd frontend && npm run dev
 **Simeon Mwale** — CS Student & Bitcoin Developer, Lusaka, Zambia  
 GitHub: [@Simeon-Mwale](https://github.com/Simeon-Mwale)
 
-Built with support from the Bitcoin Zambia community.  
-
+Built with support from the Bitcoin Zambia community.
 
 ---
 
@@ -224,5 +245,3 @@ MIT — free to use, modify, and deploy.
 ---
 
 *Built in Lusaka, Zambia. For the informal market. For Bitcoin.* 🇿🇲⚡
-slam
-> "If you want to go fast, go alone. If you want to go far, go together." — African Proverb"# trigger deploy" 

@@ -911,13 +911,13 @@ export default function POSPage() {
             )}
 
             <button onClick={handleZamPayCharge}
-              disabled={zampayLoading || !zampayPhone.trim() || !zampayZmwAmount || zampayZmwAmount <= 0}
-              className="w-full bg-[#0070ba] hover:bg-[#005c99] disabled:opacity-40 disabled:cursor-not-allowed
-                         text-white font-display font-bold text-lg rounded-2xl py-5
-                         flex items-center justify-center gap-2 transition-all active:scale-95">
-              {zampayLoading
-                ? <><RefreshCw size={18} className="animate-spin" /> Processing...</>
-                : <>📱 Charge Customer's Mobile Money {zampayZmwAmount > 0 ? `K ${zampayZmwAmount.toFixed(2)}` : ''}<ChevronRight size={18} /></>}
+             disabled={zampayLoading || !zampayPhone.trim() || !zampayZmwAmount || zampayZmwAmount <= 0}
+             className="w-full bg-bitcoin hover:bg-bitcoin-dark disabled:opacity-40 disabled:cursor-not-allowed
+             text-surface font-display font-bold text-lg rounded-2xl py-5
+             flex items-center justify-center gap-2 transition-all active:scale-95">
+             {zampayLoading
+             ? <><RefreshCw size={18} className="animate-spin" /> Processing...</>
+             : <><Phone size={18} fill="currentColor" /> Charge Customer's Mobile Money {zampayZmwAmount > 0 ? `K ${zampayZmwAmount.toFixed(2)}` : ''}<ChevronRight size={18} /></>}
             </button>
 
             <div className="bg-panel border border-border rounded-xl p-3 space-y-1">
@@ -1016,11 +1016,11 @@ export default function POSPage() {
 
             {/* ── ZamPay button — added directly below Charge, nothing else changed ── */}
             <button
-              onClick={() => { setZampayError(''); setScreen('zampay') }}
-              className="w-full border-2 border-[#0070ba] text-[#0070ba] hover:bg-[#0070ba] hover:text-white
-                         font-display font-bold text-lg rounded-2xl py-4
-                         flex items-center justify-center gap-2 transition-all active:scale-95">
-              📱 ZamPay — Airtel / MTN
+             onClick={() => { setZampayError(''); setScreen('zampay') }}
+             className="w-full bg-bitcoin hover:bg-bitcoin-dark disabled:opacity-40 disabled:cursor-not-allowed
+             text-surface font-display font-bold text-lg rounded-2xl py-5
+             flex items-center justify-center gap-2 transition-all active:scale-95">
+             <Phone size={18} fill="currentColor" /> ZamPay — Airtel / MTN <ChevronRight size={18} />
             </button>
 
             {savedAddr && (
