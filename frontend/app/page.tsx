@@ -22,7 +22,7 @@ import PWAInstallPrompt from '@/components/PWAInstallPrompt'
 import { safeCreateInvoice, getQueueLength } from '@/lib/offlineQueue'
 
 // ── Types ─────────────────────────────────────────────────────────────────────
-type Screen = 'pos' | 'invoice' | 'success' | 'onboarding' | 'withdraw'
+type Screen = 'pos' | 'invoice' | 'success' | 'onboarding' | 'withdraw' | 'zampay'
 
 interface SummaryData {
   total_zmw?: number
@@ -222,6 +222,13 @@ export default function POSPage() {
   const [withdrawing, setWithdrawing] = useState(false)
   const [withdrawResult, setWithdrawResult] = useState<string | null>(null)
 
+  // ZamPay state
+  const [zampayPhone, setZampayPhone] = useState('')
+  const [zampayAmount, setZampayAmount] = useState('')
+  const [zampayMemo, setZampayMemo] = useState('')
+  const [zampayLoading, setZampayLoading] = useState(false)
+  const [zampayError, setZampayError] = useState('')
+
   const rateRef = useRef<NodeJS.Timeout | null>(null)
 
   // ── Computed Values ────────────────────────────────────────────────────────
@@ -231,6 +238,10 @@ export default function POSPage() {
   const satsAmount = satsPerZMW && zmwAmount > 0 ? Math.max(1, Math.round(zmwAmount * satsPerZMW)) : 0
   const btcDisplay = displayedZMWperBTC && zmwAmount > 0 ? (zmwAmount / displayedZMWperBTC).toFixed(8) : '0.00000000'
   const displaySatsPerZMW = satsPerZMW.toFixed(1)
+
+  // ZamPay computed
+  const zampayZmwAmount = parseFloat(zampayAmount) || 0
+  const zampaySats = satsPerZMW && zampayZmwAmount > 0 ? Math.max(1, Math.round(zampayZmwAmount * satsPerZMW)) : 0
 
   // ── LocalStorage Helpers ───────────────────────────────────────────────────
   const isMerchantConfigured = (): boolean =>
@@ -511,6 +522,41 @@ export default function POSPage() {
   const handleWithdraw = async () => {
     setError('🏦 Sweep mode is coming soon! You will be able to withdraw sats when this feature launches.')
     return
+  }
+
+  // ── ZamPay Handler ─────────────────────────────────────────────────────────
+  const handleZamPayCharge = async () => {
+    setZampayError('')
+    if (!zampayPhone.trim() || !isValidPhone(zampayPhone)) {
+      setZampayError('Enter a valid Airtel/MTN number')
+      return
+    }
+    if (!zampayZmwAmount || zampayZmwAmount <= 0) {
+      setZampayError('Enter a valid amount')
+      return
+    }
+    setZampayLoading(true)
+    try {
+      // ZamPay / BitZed API integration point — wire up your endpoint here
+      const response = await fetch(`${API_URL}/zampay/charge`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          merchant_id: getMerchantId(),
+          customer_phone: zampayPhone.trim(),
+          amount_zmw: zampayZmwAmount,
+          memo: zampayMemo.trim() || 'ZamPay Payment',
+        }),
+      })
+      const data = await response.json()
+      if (!response.ok) throw new Error(data.detail || 'ZamPay charge failed')
+      // On success — return to POS and refresh data
+      setZampayPhone(''); setZampayAmount(''); setZampayMemo('')
+      await fetchMerchantData()
+      setScreen('pos')
+    } catch (err: any) {
+      setZampayError(err?.message || 'ZamPay charge failed. Check connection.')
+    } finally { setZampayLoading(false) }
   }
 
   const handleNewSale = () => {
@@ -813,6 +859,81 @@ export default function POSPage() {
     </main>
   )
 
+  // ── ZAMPAY SCREEN ──────────────────────────────────────────────────────────
+  if (screen === 'zampay') return (
+    <main className="min-h-screen bg-surface flex flex-col">
+      <header className="border-b border-border px-6 py-4 flex items-center justify-between">
+        <button onClick={() => { setZampayPhone(''); setZampayAmount(''); setZampayMemo(''); setZampayError(''); setScreen('pos') }}
+          className="text-text-dim hover:text-text">← Back</button>
+        <span className="font-display font-bold text-text">📱 ZamPay</span>
+        <div />
+      </header>
+      <div className="flex-1 flex flex-col items-center justify-center px-6 py-8 animate-fade-in">
+        <div className="w-full max-w-sm space-y-5">
+          <div className="bg-panel border border-border rounded-2xl p-5 space-y-4">
+            <div className="space-y-1">
+              <label className="text-text-dim text-xs font-mono uppercase tracking-widest flex items-center gap-1">
+                <Phone size={11} /> Customer Mobile Number (Airtel/MTN)
+              </label>
+              <input type="tel" value={zampayPhone} maxLength={20}
+                onChange={e => { setZampayPhone(e.target.value); setZampayError('') }}
+                placeholder="0977XXXXXX"
+                className={inputClass(zampayError && !zampayPhone ? zampayError : undefined)} />
+            </div>
+
+            <div className="space-y-1">
+              <label className="text-text-dim text-xs font-mono uppercase tracking-widest">Amount (ZMW)</label>
+              <div className="flex items-center gap-2 bg-surface border border-border rounded-xl px-4 py-3 focus-within:border-bitcoin transition-colors">
+                <span className="text-xl font-display text-text-dim">K</span>
+                <input type="number" value={zampayAmount} min="0" step="0.01"
+                  onChange={e => { setZampayAmount(e.target.value); setZampayError('') }}
+                  placeholder="0.00"
+                  className="flex-1 bg-transparent text-2xl font-display font-bold text-text outline-none placeholder:text-border" />
+              </div>
+              {zampaySats > 0 && (
+                <p className="text-text-dim font-mono text-xs flex items-center gap-1 mt-1">
+                  <Zap size={10} className="text-bitcoin" fill="#F7931A" />
+                  Merchant receives: <span className="text-bitcoin font-bold">{zampaySats.toLocaleString()} sats</span>
+                </p>
+              )}
+            </div>
+
+            <div className="space-y-1">
+              <label className="text-text-dim text-xs font-mono uppercase tracking-widest">Memo (optional)</label>
+              <input type="text" value={zampayMemo} maxLength={80}
+                onChange={e => setZampayMemo(e.target.value)}
+                placeholder="e.g., Tomatoes x3"
+                className={inputClass()} />
+            </div>
+
+            {zampayError && (
+              <p className="text-red-400 text-sm font-mono text-center bg-red-400/10 rounded-lg p-3">{zampayError}</p>
+            )}
+
+            <button onClick={handleZamPayCharge}
+              disabled={zampayLoading || !zampayPhone.trim() || !zampayZmwAmount || zampayZmwAmount <= 0}
+              className="w-full bg-[#0070ba] hover:bg-[#005c99] disabled:opacity-40 disabled:cursor-not-allowed
+                         text-white font-display font-bold text-lg rounded-2xl py-5
+                         flex items-center justify-center gap-2 transition-all active:scale-95">
+              {zampayLoading
+                ? <><RefreshCw size={18} className="animate-spin" /> Processing...</>
+                : <>📱 Charge Customer's Mobile Money {zampayZmwAmount > 0 ? `K ${zampayZmwAmount.toFixed(2)}` : ''}<ChevronRight size={18} /></>}
+            </button>
+
+            <div className="bg-panel border border-border rounded-xl p-3 space-y-1">
+              <p className="text-muted text-xs font-mono">
+                ⚠️ Customer will receive a prompt on their Airtel/MTN phone. They approve payment.
+              </p>
+              <p className="text-bitcoin text-xs font-mono">
+                ⚡ Merchant receives sats instantly via BitZed → Lightning Address
+              </p>
+            </div>
+          </div>
+        </div>
+      </div>
+    </main>
+  )
+
   // ── POS / INVOICE / SUCCESS ────────────────────────────────────────────────
   return (
     <main className="min-h-screen bg-surface flex flex-col">
@@ -892,6 +1013,16 @@ export default function POSPage() {
                 ? <><RefreshCw size={18} className="animate-spin" /> Creating invoice...</>
                 : <><Zap size={18} fill="currentColor" />{t.chargeButton} {zmwAmount > 0 ? `K ${zmwAmount.toFixed(2)}` : ''}<ChevronRight size={18} /></>}
             </button>
+
+            {/* ── ZamPay button — added directly below Charge, nothing else changed ── */}
+            <button
+              onClick={() => { setZampayError(''); setScreen('zampay') }}
+              className="w-full border-2 border-[#0070ba] text-[#0070ba] hover:bg-[#0070ba] hover:text-white
+                         font-display font-bold text-lg rounded-2xl py-4
+                         flex items-center justify-center gap-2 transition-all active:scale-95">
+              📱 ZamPay — Airtel / MTN
+            </button>
+
             {savedAddr && (
               <p className="text-center text-muted text-xs font-mono">⚡ Direct to: {savedAddr}</p>
             )}

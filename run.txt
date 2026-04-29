@@ -60,3 +60,12 @@ develop branch (test)  →  Vercel preview URL (test only)
    (merge when ready)
          ↓
 main branch (production) → zampos.vercel.app (live users)
+
+
+# 1. Generate top-up invoice
+curl -X POST http://localhost:8000/owner/breez-topup?amount_sats=10000
+
+# 2. Pay the returned invoice from your wallet
+# 3. Verify balance
+curl http://localhost:8000/owner/breez-status
+# → {"balance_sats": 10000, "status": "online"}

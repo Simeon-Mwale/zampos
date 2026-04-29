@@ -1,4 +1,4 @@
-// app/owner/page.tsx — ZamPOS Owner Dashboard v3.0 (Enhanced Production)
+// app/owner/page.tsx — ZamPOS Owner Dashboard v3.1 (Production)
 'use client'
 
 import { useState, useEffect, useCallback, useRef } from 'react'
@@ -7,7 +7,7 @@ import {
   Bitcoin, Shield, Download, Search, AlertCircle, CheckCircle,
   ChevronDown, ChevronUp, QrCode, Wallet, ArrowDownToLine,
   Activity, Database, CreditCard, Clock, AlertTriangle,
-  MessageCircle, Copy, ExternalLink, Server, DollarSign
+  Copy, Server
 } from 'lucide-react'
 
 // ── Config ───────────────────────────────────────────────────────────────────
@@ -87,6 +87,19 @@ const fmtZMW = (n: number | null | undefined) => {
 const fmtDate = (s: string) => new Date(s).toLocaleDateString('en-ZM', { day:'2-digit', month:'short', year:'numeric' })
 const fmtTime = (d: Date) => d.toLocaleTimeString('en-ZM', { hour:'2-digit', minute:'2-digit' })
 const fmtDateTime = (s: string) => new Date(s).toLocaleString('en-ZM', { day:'2-digit', month:'short', year:'numeric', hour:'2-digit', minute:'2-digit' })
+
+// FIXED: Proper date formatter that handles invalid dates and 1970 epoch
+const formatLastUpdated = (dateStr: string | undefined | null) => {
+  if (!dateStr) return 'Live'
+  try {
+    const date = new Date(dateStr)
+    // Check if date is valid and not from 1970 (Unix epoch)
+    if (isNaN(date.getTime()) || date.getFullYear() < 2024) return 'Live (cached)'
+    return date.toLocaleTimeString('en-ZM', { hour: '2-digit', minute: '2-digit' })
+  } catch {
+    return 'Live'
+  }
+}
 
 const toZMW = (sats: number, rate: RateData | null) =>
   rate?.zmw_per_btc ? (sats / 1e8) * rate.zmw_per_btc : 0
@@ -280,7 +293,6 @@ export default function OwnerDashboard() {
   const pendingWithdrawals = withdrawals.filter(w => w.status === 'pending').length
   const custodialTotal = merchants.filter(m => m.payout_mode === 'custodial')
     .reduce((sum, m) => sum + m.custodial_balance_sats, 0)
-  const recentTransactions = earnings?.total_transactions || 0
   const totalFeesSats = gasStatus?.total_fees_sats || earnings?.total_fee_sats || 0
   const needsSweep = totalFeesSats >= (gasStatus?.min_sweep_threshold || 10000)
 
@@ -445,6 +457,9 @@ export default function OwnerDashboard() {
                   {rate && (
                     <p className="text-text-dim font-mono text-xs mt-2">
                       Rate: {fmtSats(rate.zmw_per_btc)} ZMW/BTC · {rate.sats_per_zmw.toFixed(4)} sats/ZMW
+                      <span className="text-muted ml-2">
+                        · Updated: {formatLastUpdated(rate.last_updated)}
+                      </span>
                     </p>
                   )}
                 </div>
@@ -748,7 +763,7 @@ export default function OwnerDashboard() {
           </div>
         )}
 
-        {/* ── SYSTEM TAB (NEW) ── */}
+        {/* ── SYSTEM TAB ── */}
         {activeTab === 'system' && (
           <div className="space-y-4">
 
@@ -803,7 +818,7 @@ export default function OwnerDashboard() {
                 </div>
                 <div className="flex justify-between">
                   <span className="text-text-dim">Last Rate Update:</span>
-                  <span className="text-text">{rate?.last_updated ? fmtDateTime(rate.last_updated) : 'unknown'}</span>
+                  <span className="text-text">{formatLastUpdated(rate?.last_updated)}</span>
                 </div>
                 <div className="flex justify-between">
                   <span className="text-text-dim">Custodial Mode:</span>

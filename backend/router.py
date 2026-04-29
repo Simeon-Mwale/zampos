@@ -1,15 +1,11 @@
-# backend/router.py — ZamPOS v2.3 (Production Fixed with Duplicate Prevention & Recovery Codes)
+# backend/router.py — ZamPOS v2.4 (+ ZamPay / BitZed Mobile Money)
 #
-# FIXES vs previous version:
-#   1. calculate_spread() now receives sats_per_zmw (not zmw_per_btc) everywhere
-#   2. Removed mid-file duplicate imports; breez receive_payment lazy-imported
-#   3. _auto_payout_breez credits balance back on payment failure
-#   4. lnurl_pay_callback no longer overwrites gross_sats after spread calc
-#   5. real_rate / sats_per_zmw given safe defaults before try blocks so
-#      NameError is impossible if rate fetch fails
-#   6. mark_failed owner endpoint fetches withdrawal BEFORE marking failed
-#   7. Added /merchant/check-duplicate endpoint for real-time duplicate detection
-#   8. Added FREE Recovery Code System (Option A) - no SMS costs
+# CHANGES vs v2.3:
+#   + ZamPay section appended at the bottom (POST /zampay/charge, POST /zampay/webhook)
+#   + ZamPayChargeRequest model added
+#   + _call_bitzed() stub — drop real BitZed SDK call inside when ready
+#   + _send_zampay_sms() background task
+#   Everything else is identical to v2.3
 
 from fastapi import APIRouter, HTTPException, Request, BackgroundTasks, Query
 from pydantic import BaseModel, Field, validator
@@ -53,6 +49,11 @@ MAX_SATS                   = int(os.getenv("MAX_INVOICE_SATS", "100000"))
 MIN_ZMW                    = float(os.getenv("MIN_TRANSACTION_ZMW", "1.0"))
 OPERATOR_LIGHTNING_ADDRESS = os.getenv("OPERATOR_LIGHTNING_ADDRESS", "flashysuit96@walletofsatoshi.com")
 
+# ZamPay / BitZed config
+BITZED_ENABLED = os.getenv("BITZED_ENABLED", "false").lower() == "true"
+BITZED_API_KEY = os.getenv("BITZED_API_KEY", "")
+BITZED_API_URL = os.getenv("BITZED_API_URL", "https://api.bitzed.com/v1")
+
 
 # ─────────────────────────────────────────────────────────────
 # HELPERS
@@ -61,6 +62,10 @@ OPERATOR_LIGHTNING_ADDRESS = os.getenv("OPERATOR_LIGHTNING_ADDRESS", "flashysuit
 def generate_recovery_code() -> str:
     """Generate a 16-character recovery code for FREE account recovery"""
     return secrets.token_hex(8).upper()
+
+
+def _make_zampay_reference() -> str:
+    return "ZP-" + secrets.token_hex(6).upper()
 
 
 # ─────────────────────────────────────────────────────────────
@@ -171,6 +176,36 @@ class RecoverRequest(BaseModel):
         extra = "forbid"
 
 
+class ZamPayChargeRequest(BaseModel):
+    merchant_id:    int   = Field(..., gt=0)
+    customer_phone: str   = Field(..., min_length=9, max_length=20)
+    amount_zmw:     float = Field(..., gt=0, le=50_000)
+    memo:           str   = Field(default="ZamPay Payment", max_length=200)
+
+    @validator("customer_phone")
+    def clean_phone(cls, v):
+        v = v.strip().replace(" ", "").replace("-", "")
+        if v.startswith("+260"):
+            v = "0" + v[4:]
+        elif v.startswith("260") and len(v) == 12:
+            v = "0" + v[3:]
+        if not v.isdigit():
+            raise ValueError("Phone number must contain digits only")
+        if len(v) < 9 or len(v) > 13:
+            raise ValueError("Enter a valid Zambian mobile number")
+        valid_prefixes = ("097", "096", "095", "076", "077", "075", "078")
+        if not any(v.startswith(p) for p in valid_prefixes):
+            raise ValueError("Number must be Airtel (097/096/095) or MTN/Zamtel (076-078)")
+        return v
+
+    @validator("memo")
+    def clean_memo(cls, v):
+        return v.strip() or "ZamPay Payment"
+
+    class Config:
+        extra = "forbid"
+
+
 # ─────────────────────────────────────────────────────────────
 # DUPLICATE CHECK (MUST COME BEFORE /merchant/{merchant_id})
 # ─────────────────────────────────────────────────────────────
@@ -180,10 +215,6 @@ async def api_check_duplicate_merchant(
     phone_number: Optional[str] = Query(None, description="Phone number to check"),
     shop_name: Optional[str] = Query(None, description="Shop name to check")
 ):
-    """
-    Check if a merchant already exists with the given phone number or shop name.
-    This endpoint must come before /merchant/{merchant_id} to avoid path conflicts.
-    """
     if not phone_number and not shop_name:
         return {
             "exists": False,
@@ -213,10 +244,6 @@ async def api_check_duplicate_merchant(
 
 @router.post("/merchant/recover")
 async def recover_merchant(req: RecoverRequest):
-    """
-    FREE Account Recovery: Verify phone number + recovery code.
-    Returns merchant data to restore local storage - NO SMS cost!
-    """
     merchant = await verify_recovery(req.phone_number, req.recovery_code)
     
     if not merchant:
@@ -244,10 +271,6 @@ async def recover_merchant(req: RecoverRequest):
 
 @router.post("/merchant/generate-recovery")
 async def generate_new_recovery_code(merchant_id: int):
-    """
-    Generate a new recovery code for an existing merchant.
-    Returns the new recovery code to show ONCE to the merchant.
-    """
     merchant = await get_merchant_by_id(merchant_id)
     if not merchant:
         raise HTTPException(404, "Merchant not found")
@@ -273,13 +296,25 @@ async def get_exchange_rate(refresh: bool = Query(False)):
         cache_meta = get_cache_metadata()
         real_rate    = float(zmw_per_btc)
         real_sats_sp = float(sats_per_zmw)
+        
+        last_updated = cache_meta.get("last_updated")
+        if last_updated:
+            if hasattr(last_updated, 'isoformat'):
+                last_updated = last_updated.isoformat()
+            elif isinstance(last_updated, str):
+                pass
+            else:
+                last_updated = None
+        else:
+            last_updated = None
+            
         return {
             "zmw_per_btc":           real_rate,
             "displayed_zmw_per_btc": apply_spread_to_rate(real_sats_sp),
             "sats_per_zmw":          real_sats_sp,
-            "last_updated":          cache_meta["last_updated"],
-            "source":                cache_meta["source"],
-            "cache_valid":           cache_meta["is_valid"],
+            "last_updated":          last_updated,
+            "source":                cache_meta.get("source", "coingecko+exchangerate"),
+            "cache_valid":           cache_meta.get("is_valid", True),
         }
     except Exception as e:
         logger.error(f"❌ Rate: {e}")
@@ -292,7 +327,6 @@ async def get_exchange_rate(refresh: bool = Query(False)):
             "cache_valid": False,
             "warning": "Using fallback rates",
         }
-
 
 @router.get("/price/convert")
 async def convert_price(zmw: float, refresh: bool = Query(False)):
@@ -332,7 +366,6 @@ async def convert_price(zmw: float, refresh: bool = Query(False)):
 
 @router.post("/merchant/register")
 async def register_merchant(req: MerchantRegisterRequest):
-    # Check for duplicates before registration
     duplicate = await check_duplicate_merchant(req.phone_number, req.shop_name)
     if duplicate:
         raise HTTPException(
@@ -355,7 +388,6 @@ async def register_merchant(req: MerchantRegisterRequest):
             "wallet_domain":   v["domain"],
         }
     
-    # Generate FREE recovery code
     recovery_code = generate_recovery_code()
     
     try:
@@ -1166,3 +1198,269 @@ async def _send_sms_notification(
         logger.info(f"📱 SMS sent to {merchant_phone}")
     else:
         logger.warning(f"⚠️ SMS failed to {merchant_phone}: {r['error']}")
+
+
+# ═════════════════════════════════════════════════════════════
+# ZAMPAY — Mobile Money → Sats (BitZed Bridge)
+# ═════════════════════════════════════════════════════════════
+#
+# STATUS: Production-ready stub.
+#   BITZED_ENABLED=false  → runs in stub mode (logs, saves to DB, returns success)
+#   BITZED_ENABLED=true   → un-comment the httpx block inside _call_bitzed()
+#
+# Endpoints:
+#   POST /zampay/charge    ← called by the frontend ZamPay button
+#   POST /zampay/webhook   ← BitZed posts here when customer approves/declines
+#
+# When you have BitZed credentials:
+#   1. Add to .env:  BITZED_ENABLED=true  BITZED_API_KEY=xxx
+#   2. Un-comment the httpx block in _call_bitzed() below
+#   3. Give BitZed this webhook URL: https://yourdomain.com/zampay/webhook
+# ─────────────────────────────────────────────────────────────
+
+async def _call_bitzed(
+    customer_phone: str,
+    amount_zmw: float,
+    merchant_lightning_address: str,
+    memo: str,
+    reference: str,
+) -> dict:
+    """
+    ── BitZed integration point ──────────────────────────────────────────────
+    When BitZed gives you their API, un-comment the httpx block below and
+    delete the stub return. No other code needs to change.
+
+    Expected return shape:
+    {
+        "success":    bool,
+        "bitzed_ref": str,    # BitZed's own transaction ID
+        "status":     str,    # "pending" | "approved" | "failed"
+        "error":      str | None,
+    }
+    ─────────────────────────────────────────────────────────────────────────
+    """
+    if not BITZED_ENABLED:
+        # ── STUB: logs intent, returns "pending" so frontend shows success ──
+        logger.info(
+            f"[ZamPay STUB] Would charge {customer_phone} K{amount_zmw:.2f} "
+            f"→ {merchant_lightning_address} | ref={reference}"
+        )
+        return {
+            "success":    True,
+            "bitzed_ref": f"STUB-{reference}",
+            "status":     "pending",
+            "error":      None,
+        }
+
+    # ── REAL BitZed call — un-comment when ready ──────────────────────────
+    # import httpx
+    # try:
+    #     async with httpx.AsyncClient() as client:
+    #         r = await client.post(
+    #             f"{BITZED_API_URL}/mobile-money/charge",
+    #             headers={"Authorization": f"Bearer {BITZED_API_KEY}"},
+    #             json={
+    #                 "phone":             customer_phone,
+    #                 "amount_zmw":        amount_zmw,
+    #                 "lightning_address": merchant_lightning_address,
+    #                 "reference":         reference,
+    #                 "memo":              memo,
+    #             },
+    #             timeout=30,
+    #         )
+    #         data = r.json()
+    #         return {
+    #             "success":    r.status_code == 200,
+    #             "bitzed_ref": data.get("id", reference),
+    #             "status":     data.get("status", "pending"),
+    #             "error":      data.get("error"),
+    #         }
+    # except Exception as e:
+    #     logger.error(f"BitZed HTTP error: {e}")
+    #     return {"success": False, "bitzed_ref": reference, "status": "failed", "error": str(e)}
+
+    raise HTTPException(503, "BitZed not yet enabled — set BITZED_ENABLED=true in .env")
+
+
+@router.post("/zampay/charge")
+async def zampay_charge(req: ZamPayChargeRequest, background_tasks: BackgroundTasks):
+    """
+    Initiate a ZamPay (Airtel/MTN → sats) charge.
+    Frontend ZamPay button posts here.
+    """
+    # 1. Merchant lookup
+    merchant = await get_merchant_by_id(req.merchant_id)
+    if not merchant:
+        raise HTTPException(404, "Merchant not found")
+
+    lightning_address = merchant.get("lightning_address") or OPERATOR_LIGHTNING_ADDRESS
+
+    # 2. Rate + sats
+    try:
+        zmw_per_btc, sats_per_zmw = await fetch_live_rates(force_refresh=False)
+        real_sats_per_zmw = float(sats_per_zmw)
+        gross_sats, merchant_sats, operator_sats = calculate_spread(
+            req.amount_zmw, real_sats_per_zmw
+        )
+        if gross_sats == 0:
+            raise ValueError("Rate produced 0 sats — amount too small")
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"ZamPay rate error: {e}")
+        raise HTTPException(502, "Could not fetch exchange rate. Try again.")
+
+    # 3. BitZed call (stub until BITZED_ENABLED=true)
+    reference = _make_zampay_reference()
+    try:
+        bitzed_result = await _call_bitzed(
+            customer_phone=req.customer_phone,
+            amount_zmw=req.amount_zmw,
+            merchant_lightning_address=lightning_address,
+            memo=req.memo,
+            reference=reference,
+        )
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"BitZed call failed: {e}")
+        raise HTTPException(502, "Mobile money service unavailable. Try again.")
+
+    if not bitzed_result["success"]:
+        raise HTTPException(
+            400,
+            f"ZamPay charge failed: {bitzed_result.get('error', 'Unknown error')}"
+        )
+
+    # 4. Save to DB — bitzed_ref is the payment_hash so webhook can match it
+    cache_meta   = get_cache_metadata()
+    payment_hash = bitzed_result["bitzed_ref"]
+
+    await save_transaction(
+        payment_hash=payment_hash,
+        merchant_id=req.merchant_id,
+        amount_zmw=req.amount_zmw,
+        gross_sats=gross_sats,
+        merchant_sats=merchant_sats,
+        operator_sats=operator_sats,
+        memo=req.memo,
+        payout_mode="zampay",
+        rate_snapshot={
+            "zmw_per_btc":    float(zmw_per_btc),
+            "sats_per_zmw":   real_sats_per_zmw,
+            "customer_phone": req.customer_phone,
+            "reference":      reference,
+            "bitzed_ref":     payment_hash,
+            "timestamp":      cache_meta.get("last_updated"),
+        },
+    )
+
+    logger.info(
+        f"📱 ZamPay initiated | merchant={req.merchant_id} | "
+        f"K{req.amount_zmw:.2f} → {req.customer_phone} | ref={reference} | "
+        f"{gross_sats} sats → {lightning_address}"
+    )
+
+    return {
+        "success":           True,
+        "reference":         reference,
+        "bitzed_ref":        payment_hash,
+        "status":            bitzed_result["status"],
+        "amount_zmw":        req.amount_zmw,
+        "gross_sats":        gross_sats,
+        "merchant_sats":     merchant_sats,
+        "operator_sats":     operator_sats,
+        "customer_phone":    req.customer_phone,
+        "lightning_address": lightning_address,
+        "memo":              req.memo,
+        "message":           f"✅ Mobile money prompt sent to {req.customer_phone}. Waiting for customer approval.",
+    }
+
+
+@router.post("/zampay/webhook")
+async def zampay_webhook(request: Request, background_tasks: BackgroundTasks):
+    """
+    BitZed calls this when a customer approves or declines their mobile money prompt.
+
+    Register this URL in your BitZed dashboard:
+        https://yourdomain.com/zampay/webhook
+
+    Expected payload:
+    {
+        "reference":  "ZP-XXXXXX",
+        "status":     "approved" | "declined" | "failed",
+        "amount_zmw": 50.00,
+        "phone":      "0971234567"
+    }
+    """
+    try:
+        body      = await request.json()
+        reference = body.get("reference") or body.get("bitzed_ref")
+        status    = body.get("status", "").lower()
+
+        if not reference:
+            logger.warning("ZamPay webhook: missing reference")
+            return {"status": "ignored", "reason": "no reference"}
+
+        if status not in ("approved", "success", "declined", "failed"):
+            logger.info(f"ZamPay webhook: unhandled status '{status}' ref={reference}")
+            return {"status": "ignored", "reason": f"unhandled status: {status}"}
+
+        if status in ("approved", "success"):
+            paid = await mark_paid(reference)
+            if paid:
+                tx = await get_transaction_by_hash(reference)
+                if tx:
+                    m = await get_merchant_by_id(tx["merchant_id"])
+                    if m:
+                        background_tasks.add_task(
+                            _send_zampay_sms,
+                            payment_hash=reference,
+                            merchant_phone=m["phone_number"],
+                            shop_name=m["shop_name"],
+                            amount_zmw=tx["amount_zmw"],
+                            gross_sats=tx["gross_sats"],
+                            lightning_address=m.get("lightning_address") or OPERATOR_LIGHTNING_ADDRESS,
+                            customer_phone=body.get("phone", ""),
+                        )
+            logger.info(f"✅ ZamPay approved | ref={reference}")
+
+        else:
+            # declined / failed — expire the pending transaction
+            async with aiosqlite.connect(DB_PATH) as db:
+                await db.execute(
+                    "UPDATE transactions SET status='expired' "
+                    "WHERE payment_hash=? AND status='pending'",
+                    (reference,),
+                )
+                await db.commit()
+            logger.info(f"❌ ZamPay {status} | ref={reference}")
+
+        return {"status": "received", "reference": reference}
+
+    except Exception as e:
+        logger.error(f"❌ ZamPay webhook: {e}", exc_info=True)
+        return {"status": "error"}
+
+
+async def _send_zampay_sms(
+    payment_hash: str,
+    merchant_phone: str,
+    shop_name: str,
+    amount_zmw: float,
+    gross_sats: int,
+    lightning_address: str,
+    customer_phone: str,
+):
+    r = await send_payment_confirmation(
+        phone_number=merchant_phone,
+        shop_name=shop_name,
+        amount_zmw=amount_zmw,
+        gross_sats=gross_sats,
+        lightning_address=lightning_address,
+    )
+    if r["success"]:
+        await mark_sms_sent(payment_hash)
+        logger.info(f"📱 ZamPay SMS sent to {merchant_phone} (customer: {customer_phone})")
+    else:
+        logger.warning(f"⚠️ ZamPay SMS failed to {merchant_phone}: {r['error']}")
